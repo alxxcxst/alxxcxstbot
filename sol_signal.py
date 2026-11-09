@@ -9,14 +9,13 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ==========================================
 # 1. CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ==========================================
-# Compatible con cualquier nombre que tengas en Render Environment
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "8459722038"
 PORT = int(os.getenv("PORT", 8080))
 
 # Parámetros Operativos SOL/USDT
 SYMBOL = "SOLUSDT"
-UMBRAL_BE_PCT = 0.015   # 1.5% de movimiento favorable para avisar Break-Even
+UMBRAL_BE_PCT = 0.015   # 1.5% a favor para avisar Break-Even
 RATIO_TP_PCT = 0.030    # 3.0% Take Profit
 RATIO_SL_PCT = 0.015    # 1.5% Stop Loss
 
@@ -28,7 +27,7 @@ estado = {
     "precio_entrada": 0.0,
     "take_profit": 0.0,
     "stop_loss": 0.0,
-    "be_activado": False,      # Bandera para evitar alertas duplicadas
+    "be_activado": False,      # Evita enviar alertas duplicadas de BE
     "velas_escaneadas": 0
 }
 
@@ -53,11 +52,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚡ *ALPHA BOT CONECTADO*\n\n"
         "• *Par:* SOL/USDT\n"
         "• *Velas:* 15m (EMA 200 + RSI 14)\n\n"
-        "Comandos:\n"
-        "/status - Ver estado del escáner y posición\n"
-        "/reset - Limpiar posición a mano para nueva señal"
+        "Comandos disponibles:\n"
+        "/status - Ver estado del escáner y posición actual\n"
+        "/precio - Consultar precio spot en vivo de SOL\n"
+        "/reset - Limpiar trade activo a mano"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def precio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Consulta y envía el precio spot actual de SOL/USDT."""
+    try:
+        res = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}", timeout=5)
+        if res.status_code == 200:
+            precio = float(res.json()["price"])
+            msg = (
+                f"🪙 *SOL/USDT*\n\n"
+                f"• Precio actual: *${precio:.3f} USDT*\n"
+                f"• Intervalo monitoreado: 15m\n"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ No se pudo obtener el precio de Binance en este momento.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error al consultar precio: {e}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if estado["posicion"]:
@@ -183,20 +200,20 @@ async def loop_escaneo(bot_app: Application):
         except Exception as e:
             print(f"[ERROR] En loop de escaneo: {e}")
 
-        await asyncio.sleep(20)  # Consulta cada 20 segundos
+        await asyncio.sleep(20)
 
 # ==========================================
-# 7. FUNCIÓN DE ARRANQUE CON ASYNCIO
+# 7. ARRANQUE CON ASYNCIO
 # ==========================================
 async def on_startup(app: Application):
-    """Arranca el loop de escaneo dentro del bucle de eventos nativo de Telegram."""
+    """Arranca el loop de escaneo sin tocar configuraciones de menú en Telegram."""
     asyncio.create_task(loop_escaneo(app))
 
 def main():
     # 1. Levantar servidor Flask en hilo secundario (Keep-Alive Render)
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # 2. Configurar bot de Telegram con post_init (compatible con Python 3.14+)
+    # 2. Configurar bot de Telegram con post_init
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -204,9 +221,10 @@ def main():
         .build()
     )
 
-    # 3. Registrar handlers
+    # 3. Registrar handlers de comandos y botones
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("precio", precio_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("clear", reset_command))
     app.add_handler(CallbackQueryHandler(button_handler))
