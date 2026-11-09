@@ -23,9 +23,11 @@ BE_PCT = 0.015  # +1.5% Break-Even
 PHANTOM_URL = "https://phantom.app/ul/browse/https%3A%2F%2Fphantom.app"
 TRADINGVIEW_URL = "https://www.tradingview.com/chart/?symbol=BINANCE%3ASOLUSDT"
 
+# Variables de estado global compartidas
 active_trade = None
 last_processed_candle = None
 candles_scanned_count = 0
+latest_market_data = None  # Almacena precio, ema y rsi para respuesta inmediata
 
 # ==========================================
 # 2. SERVIDOR KEEP-ALIVE FLASK
@@ -90,7 +92,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 5. LISTENER DE COMANDOS
+# 5. LISTENER DE COMANDOS INTERACTIVOS
 # ==========================================
 def telegram_listener():
     offset = None
@@ -114,20 +116,33 @@ def telegram_listener():
                     text = raw_text.lower()
 
                     if text.startswith("/precio") or text == "precio":
-                        candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=210)
-                        df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df = calculate_indicators(df)
-                        c = df.iloc[-1]
-                        
-                        trend_badge = "🟢 LONG Bias" if c['close'] > c['ema200'] else "🔴 SHORT Bias"
-                        
-                        resp = (
-                            "📊 <b>SOL/USDT · EN VIVO</b>\n\n"
-                            f"Precio: <code>${c['close']:.2f}</code>\n"
-                            f"EMA 200: <code>${c['ema200']:.2f}</code>\n"
-                            f"RSI (14): <code>{c['rsi']:.1f}</code>\n"
-                            f"Sesgo: {trend_badge}"
-                        )
+                        # Usa los datos en memoria para responder de inmediato
+                        data = latest_market_data
+                        if not data:
+                            try:
+                                ticker = exchange.fetch_ticker(SYMBOL)
+                                data = {"price": ticker['last'], "ema": None, "rsi": None}
+                            except Exception:
+                                pass
+
+                        if data and data.get("price"):
+                            p = data["price"]
+                            ema_str = f"${data['ema']:.2f}" if data.get("ema") else "Calculando..."
+                            rsi_str = f"{data['rsi']:.1f}" if data.get("rsi") else "Calculando..."
+                            trend = ""
+                            if data.get("ema"):
+                                trend = "\nSesgo: 🟢 LONG Bias" if p > data["ema"] else "\nSesgo: 🔴 SHORT Bias"
+
+                            resp = (
+                                "📊 <b>SOL/USDT · EN VIVO</b>\n\n"
+                                f"Precio: <code>${p:.2f}</code>\n"
+                                f"EMA 200: <code>{ema_str}</code>\n"
+                                f"RSI (14): <code>{rsi_str}</code>"
+                                f"{trend}"
+                            )
+                        else:
+                            resp = "⏳ Obteniendo primera lectura de mercado de Binance..."
+
                         send_telegram_alert(resp, target_chat_id=chat_id, reply_markup=get_action_buttons())
 
                     elif text.startswith("/status") or text == "status":
@@ -146,13 +161,14 @@ def telegram_listener():
                     elif text.startswith("/start") or text.startswith("/ayuda") or text.startswith("/help"):
                         resp = (
                             "⚙️ <b>COMANDOS</b>\n\n"
-                            "• <code>/precio</code> — Ver datos en vivo\n"
+                            "• <code>/precio</code> — Cotizacion en vivo\n"
                             "• <code>/status</code> — Diagnostico del bot\n"
                             "• <code>/ayuda</code> — Lista de comandos"
                         )
                         send_telegram_alert(resp, target_chat_id=chat_id)
 
-        except Exception:
+        except Exception as e:
+            print(f"Error en telegram_listener: {e}")
             time.sleep(3)
 
         time.sleep(1)
@@ -161,11 +177,11 @@ def telegram_listener():
 # 6. BUCLE PRINCIPAL DE MERCADO
 # ==========================================
 def bot_loop():
-    global active_trade, last_processed_candle, candles_scanned_count
-    time.sleep(4)
+    global active_trade, last_processed_candle, candles_scanned_count, latest_market_data
+    time.sleep(3)
     
     boot_msg = (
-        "🎯 <b>ALPHA BOT CONECTADO</b>\n\n"
+        "🎯 <b>SOL BOT CONECTADO</b>\n\n"
         f"Par: <code>{SYMBOL}</code>\n"
         f"Velas: <code>{TIMEFRAME}</code>\n"
         "Filtros: EMA 200 + RSI + Vol MA20\n\n"
@@ -183,6 +199,13 @@ def bot_loop():
 
             live_candle = df.iloc[-1]
             live_price = live_candle['close']
+
+            # Guarda en memoria para que /precio responda al instante
+            latest_market_data = {
+                "price": live_price,
+                "ema": live_candle['ema200'],
+                "rsi": live_candle['rsi']
+            }
 
             # --- VIGILANCIA BREAK-EVEN (+1.5%) ---
             if active_trade and not active_trade.get('be_triggered'):
@@ -256,7 +279,7 @@ def bot_loop():
         except Exception as e:
             print(f"Error en escaneo de mercado: {e}")
 
-        time.sleep(60)
+        time.sleep(30)
 
 # ==========================================
 # 7. EJECUCION MULTIHILO
