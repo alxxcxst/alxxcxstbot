@@ -60,21 +60,46 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def precio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Consulta y envía el precio spot actual de SOL/USDT."""
+    """Consulta y envía el precio spot actual de SOL con fallback."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    precio = None
+
+    # Intento 1: Binance Spot API con cabeceras de navegador
     try:
-        res = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}", timeout=5)
+        res = requests.get(
+            f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}",
+            headers=headers,
+            timeout=4
+        )
         if res.status_code == 200:
             precio = float(res.json()["price"])
-            msg = (
-                f"🪙 *SOL/USDT*\n\n"
-                f"• Precio actual: *${precio:.3f} USDT*\n"
-                f"• Intervalo monitoreado: 15m\n"
+    except Exception:
+        precio = None
+
+    # Intento 2: Fallback a CoinGecko si Render fue bloqueado por Binance
+    if precio is None:
+        try:
+            res_cg = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+                headers=headers,
+                timeout=4
             )
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        else:
-            await update.message.reply_text("⚠️ No se pudo obtener el precio de Binance en este momento.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error al consultar precio: {e}")
+            if res_cg.status_code == 200:
+                precio = float(res_cg.json()["solana"]["usd"])
+        except Exception:
+            precio = None
+
+    if precio is not None:
+        msg = (
+            f"🪙 *SOL/USDT*\n\n"
+            f"• Precio actual: *${precio:.2f} USD*\n"
+            f"• Intervalo monitoreado: 15m\n"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ No se pudo obtener la cotización en este momento. Intenta de nuevo en unos segundos.")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if estado["posicion"]:
@@ -186,11 +211,16 @@ async def verificar_break_even(precio_actual: float, bot_app: Application):
 async def loop_escaneo(bot_app: Application):
     """Ciclo en segundo plano que vigila el precio y busca nuevas señales."""
     await asyncio.sleep(3)
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     while True:
         try:
-            # Monitoreo de precio Spot SOL/USDT vía Binance API pública
-            res_ticker = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}", timeout=5)
+            # Monitoreo de precio Spot
+            res_ticker = requests.get(
+                f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}",
+                headers=headers,
+                timeout=5
+            )
             if res_ticker.status_code == 200:
                 precio_actual = float(res_ticker.json()["price"])
                 await verificar_break_even(precio_actual, bot_app)
@@ -203,10 +233,10 @@ async def loop_escaneo(bot_app: Application):
         await asyncio.sleep(20)
 
 # ==========================================
-# 7. ARRANQUE CON ASYNCIO
+# 7. INICIO ASÍNCRONO DEL SERVICIO
 # ==========================================
 async def on_startup(app: Application):
-    """Arranca el loop de escaneo sin tocar configuraciones de menú en Telegram."""
+    """Arranca el loop de escaneo sin interferir con BotFather."""
     asyncio.create_task(loop_escaneo(app))
 
 def main():
