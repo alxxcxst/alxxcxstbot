@@ -8,7 +8,7 @@ from flask import Flask
 # ==========================================
 # 1. PARAMETROS Y CREDENCIALES
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "9177159589:AAFi-rrr0m4yxvAiocGtlbo0Wa7LEo0iaLU")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = "8459722038"
 
 SYMBOL = "SOL/USDT"
