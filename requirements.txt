@@ -1,6 +1,3 @@
 flask
 requests
 pandas
-solders
-solana
-base58
