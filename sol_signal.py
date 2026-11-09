@@ -23,11 +23,10 @@ BE_PCT = 0.015  # +1.5% Break-Even
 PHANTOM_URL = "https://phantom.app/ul/browse/https%3A%2F%2Fphantom.app"
 TRADINGVIEW_URL = "https://www.tradingview.com/chart/?symbol=BINANCE%3ASOLUSDT"
 
-# Variables de estado global compartidas
 active_trade = None
 last_processed_candle = None
 candles_scanned_count = 0
-latest_market_data = None  # Almacena precio, ema y rsi para respuesta inmediata
+latest_market_data = {}
 
 # ==========================================
 # 2. SERVIDOR KEEP-ALIVE FLASK
@@ -91,12 +90,29 @@ def calculate_indicators(df):
     df['rsi'] = 100 - (100 / (1 + rs))
     return df
 
+def get_live_sol_price():
+    # Intenta obtener el precio de Binance, OKX o CoinGecko
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=5).json()
+        if "price" in r:
+            return float(r["price"])
+    except Exception:
+        pass
+
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", timeout=5).json()
+        if "solana" in r and "usd" in r["solana"]:
+            return float(r["solana"]["usd"])
+    except Exception:
+        pass
+
+    return None
+
 # ==========================================
-# 5. LISTENER DE COMANDOS INTERACTIVOS
+# 5. LISTENER DE COMANDOS
 # ==========================================
 def telegram_listener():
     offset = None
-    exchange = ccxt.binance({"enableRateLimit": True})
 
     while True:
         try:
@@ -116,22 +132,16 @@ def telegram_listener():
                     text = raw_text.lower()
 
                     if text.startswith("/precio") or text == "precio":
-                        # Usa los datos en memoria para responder de inmediato
-                        data = latest_market_data
-                        if not data:
-                            try:
-                                ticker = exchange.fetch_ticker(SYMBOL)
-                                data = {"price": ticker['last'], "ema": None, "rsi": None}
-                            except Exception:
-                                pass
+                        p = latest_market_data.get("price") or get_live_sol_price()
+                        ema = latest_market_data.get("ema")
+                        rsi = latest_market_data.get("rsi")
 
-                        if data and data.get("price"):
-                            p = data["price"]
-                            ema_str = f"${data['ema']:.2f}" if data.get("ema") else "Calculando..."
-                            rsi_str = f"{data['rsi']:.1f}" if data.get("rsi") else "Calculando..."
+                        if p:
+                            ema_str = f"${ema:.2f}" if ema else "Sincronizando..."
+                            rsi_str = f"{rsi:.1f}" if rsi else "Sincronizando..."
                             trend = ""
-                            if data.get("ema"):
-                                trend = "\nSesgo: 🟢 LONG Bias" if p > data["ema"] else "\nSesgo: 🔴 SHORT Bias"
+                            if ema:
+                                trend = "\nSesgo: 🟢 LONG Bias" if p > ema else "\nSesgo: 🔴 SHORT Bias"
 
                             resp = (
                                 "📊 <b>SOL/USDT · EN VIVO</b>\n\n"
@@ -141,7 +151,7 @@ def telegram_listener():
                                 f"{trend}"
                             )
                         else:
-                            resp = "⏳ Obteniendo primera lectura de mercado de Binance..."
+                            resp = "⚠️ No se pudo conectar a los feeds de mercado. Reintentando..."
 
                         send_telegram_alert(resp, target_chat_id=chat_id, reply_markup=get_action_buttons())
 
@@ -161,27 +171,26 @@ def telegram_listener():
                     elif text.startswith("/start") or text.startswith("/ayuda") or text.startswith("/help"):
                         resp = (
                             "⚙️ <b>COMANDOS</b>\n\n"
-                            "• <code>/precio</code> — Cotizacion en vivo\n"
+                            "• <code>/precio</code> — Ver precio en tiempo real\n"
                             "• <code>/status</code> — Diagnostico del bot\n"
                             "• <code>/ayuda</code> — Lista de comandos"
                         )
                         send_telegram_alert(resp, target_chat_id=chat_id)
 
         except Exception as e:
-            print(f"Error en telegram_listener: {e}")
             time.sleep(3)
 
         time.sleep(1)
 
 # ==========================================
-# 6. BUCLE PRINCIPAL DE MERCADO
+# 6. BUCLE PRINCIPAL DE MERCADO (OKX / BINANCE)
 # ==========================================
 def bot_loop():
     global active_trade, last_processed_candle, candles_scanned_count, latest_market_data
     time.sleep(3)
     
     boot_msg = (
-        "🎯 <b>SOL BOT CONECTADO</b>\n\n"
+        "🎯 <b>ALPHA BOT CONECTADO</b>\n\n"
         f"Par: <code>{SYMBOL}</code>\n"
         f"Velas: <code>{TIMEFRAME}</code>\n"
         "Filtros: EMA 200 + RSI + Vol MA20\n\n"
@@ -189,108 +198,24 @@ def bot_loop():
     )
     send_telegram_alert(boot_msg, reply_markup=get_action_buttons())
 
-    exchange = ccxt.binance({"enableRateLimit": True})
+    # Probar conexión con OKX primero (no bloquea servidores de Render) o Binance de fallback
+    try:
+        exchange = ccxt.okx({"enableRateLimit": True})
+        exchange.load_markets()
+    except Exception:
+        exchange = ccxt.binance({"enableRateLimit": True})
 
     while True:
         try:
-            candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT_CANDLES)
+            # Obtener velas
+            try:
+                candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT_CANDLES)
+            except Exception:
+                # Si falla OKX, intenta con Binance
+                fallback_ex = ccxt.binance({"enableRateLimit": True})
+                candles = fallback_ex.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT_CANDLES)
+
             df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df = calculate_indicators(df)
 
-            live_candle = df.iloc[-1]
-            live_price = live_candle['close']
-
-            # Guarda en memoria para que /precio responda al instante
-            latest_market_data = {
-                "price": live_price,
-                "ema": live_candle['ema200'],
-                "rsi": live_candle['rsi']
-            }
-
-            # --- VIGILANCIA BREAK-EVEN (+1.5%) ---
-            if active_trade and not active_trade.get('be_triggered'):
-                entry = active_trade['entry']
-                t_type = active_trade['type']
-
-                if (t_type == "LONG" and live_price >= entry * (1 + BE_PCT)) or \
-                   (t_type == "SHORT" and live_price <= entry * (1 - BE_PCT)):
-                    
-                    be_badge = "🟢 LONG" if t_type == "LONG" else "🔴 SHORT"
-                    be_card = (
-                        f"🛡️ <b>BREAK-EVEN · {be_badge}</b>\n\n"
-                        f"Ganancia actual: <b>+1.5%</b> (<code>${live_price:.2f}</code>)\n\n"
-                        f"👉 Mueve el SL en Phantom a tu entrada:\n"
-                        f"<code>{entry:.2f}</code>\n\n"
-                        "<i>Operacion asegurada sin riesgo.</i>"
-                    )
-                    send_telegram_alert(be_card, reply_markup=get_action_buttons())
-                    active_trade['be_triggered'] = True
-
-            # --- ANÁLISIS DE VELA CERRADA ---
-            current_candle = df.iloc[-2]
-            prev_candle = df.iloc[-3]
-            candle_time = current_candle['timestamp']
-
-            if candle_time != last_processed_candle:
-                candles_scanned_count += 1
-                last_processed_candle = candle_time
-                
-                price = current_candle['close']
-                ema = current_candle['ema200']
-                rsi = current_candle['rsi']
-                prev_rsi = prev_candle['rsi']
-                vol = current_candle['volume']
-                vol_avg = current_candle['vol_ma20']
-
-                has_volume = vol > vol_avg
-
-                # Señal LONG
-                if price > ema and prev_rsi < 35 and rsi >= 35 and has_volume:
-                    sl = price * (1 - SL_PCT)
-                    tp = price * (1 + TP_PCT)
-                    
-                    card_long = (
-                        "🟢 <b>LONG · SOL/USDT</b> 🔼\n\n"
-                        f"Entrada: <code>{price:.2f}</code>\n"
-                        f"TP (+3.0%): <code>{tp:.2f}</code>\n"
-                        f"SL (-1.5%): <code>{sl:.2f}</code>\n\n"
-                        f"Ratio: 1:2\n"
-                        f"Filtro: RSI {rsi:.1f} + Volumen confirmado"
-                    )
-                    send_telegram_alert(card_long, reply_markup=get_action_buttons())
-                    active_trade = {'type': 'LONG', 'entry': price, 'be_triggered': False}
-
-                # Señal SHORT
-                elif price < ema and prev_rsi > 65 and rsi <= 65 and has_volume:
-                    sl = price * (1 + SL_PCT)
-                    tp = price * (1 - TP_PCT)
-                    
-                    card_short = (
-                        "🔴 <b>SHORT · SOL/USDT</b> 🔽\n\n"
-                        f"Entrada: <code>{price:.2f}</code>\n"
-                        f"TP (+3.0%): <code>{tp:.2f}</code>\n"
-                        f"SL (-1.5%): <code>{sl:.2f}</code>\n\n"
-                        f"Ratio: 1:2\n"
-                        f"Filtro: RSI {rsi:.1f} + Volumen confirmado"
-                    )
-                    send_telegram_alert(card_short, reply_markup=get_action_buttons())
-                    active_trade = {'type': 'SHORT', 'entry': price, 'be_triggered': False}
-
-        except Exception as e:
-            print(f"Error en escaneo de mercado: {e}")
-
-        time.sleep(30)
-
-# ==========================================
-# 7. EJECUCION MULTIHILO
-# ==========================================
-if __name__ == '__main__':
-    t_market = threading.Thread(target=bot_loop)
-    t_market.daemon = True
-    t_market.start()
-
-    t_tg = threading.Thread(target=telegram_listener)
-    t_tg.daemon = True
-    t_tg.start()
-
-    run_flask()
+            live_candle = df.iloc
