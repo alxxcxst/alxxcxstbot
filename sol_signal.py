@@ -2,139 +2,160 @@ import os
 import time
 import threading
 import requests
-import ccxt
 import pandas as pd
+import ccxt
 from flask import Flask
 
 # ==========================================
-# 1. SERVIDOR WEB LIGERO PARA RENDER
+# 1. CONFIGURACIÓN Y CREDENCIALES
 # ==========================================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "🟢 Bot de Señales SOL activo y monitoreando el mercado 24/7."
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# ==========================================
-# 2. CONFIGURACIÓN DEL BOT Y TELEGRAM
-# ==========================================
-TELEGRAM_TOKEN = "9177159589:AAEdG7oQpKfAQO6osw9AtO4HwgJJW43B4dE"
-CHAT_ID = "8459722038"
+TELEGRAM_BOT_TOKEN = "9177159589:AAEdG7oQpKfAQO6osw9AtO4HwgJJW43B4dE"
+TELEGRAM_CHAT_ID = "8459722038"
 
 SYMBOL = "SOL/USDT"
 TIMEFRAME = "15m"
+LIMIT_CANDLES = 250
 
-# Conexión a datos públicos de Binance
-exchange = ccxt.binance({"enableRateLimit": True})
+SL_PCT = 0.015  # -1.5% Stop Loss
+TP_PCT = 0.030  # +3.0% Take Profit
+LEVERAGE = "6x"
 
-def send_telegram_alert(message: str):
-    """Envía un mensaje formateado a Telegram."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+# ==========================================
+# 2. SERVIDOR WEB FLASK (KEEP-ALIVE)
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot de Señales SOL activo y monitoreando el mercado 24/7.", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+# ==========================================
+# 3. ENVÍO DE ALERTAS CON HTML A TELEGRAM
+# ==========================================
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML"
     }
     try:
-        response = requests.post(url, json=payload, timeout=8)
-        if response.status_code == 200:
-            print("Alerta enviada correctamente a Telegram.")
-        else:
-            print(f"Error al enviar a Telegram: {response.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error de conexión con Telegram: {e}")
+        print(f"Error enviando mensaje a Telegram: {e}")
 
-def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calcula el RSI de 14 periodos."""
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+# ==========================================
+# 4. CÁLCULO DE INDICADORES MATEMÁTICOS
+# ==========================================
+def calculate_indicators(df):
+    # Media Móvil Exponencial (EMA 200)
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+
+    # Índice de Fuerza Relativa (RSI 14)
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
     
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    df['rsi'] = 100 - (100 / (1 + rs))
+    return df
 
-last_alerted_candle_time = None
-
-def scan_market():
-    global last_alerted_candle_time
-    
-    # Descargar últimas 250 velas de 15 minutos
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
-    df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
-    
-    # Indicadores
-    df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
-    df["rsi"] = calculate_rsi(df["close"], period=14)
-    
-    # Velas cerradas (-2 y -3)
-    prev_closed = df.iloc[-3]
-    last_closed = df.iloc[-2]
-    candle_timestamp = last_closed["time"]
-    
-    if last_alerted_candle_time == candle_timestamp:
-        return
-
-    price = float(last_closed["close"])
-    ema = float(last_closed["ema_200"])
-    rsi_now = float(last_closed["rsi"])
-    rsi_prev = float(prev_closed["rsi"])
-
-    # Señal de COMPRA (LONG)
-    if price > ema and rsi_prev <= 35 and rsi_now > 35:
-        sl = round(price * 0.985, 2)
-        tp = round(price * 1.030, 2)
-        msg = (
-            f"🚀 *SEÑAL LONG CONFIRMADA: {SYMBOL}*\n\n"
-            f"• *Temporalidad:* {TIMEFRAME}\n"
-            f"• *Precio Entrada:* ${price:.2f}\n"
-            f"• *Stop-Loss (SL):* ${sl:.2f} (-1.5%)\n"
-            f"• *Take-Profit (TP):* ${tp:.2f} (+3.0%)\n"
-            f"• *Ratio Riesgo/Beneficio:* 1:2\n\n"
-            f"📊 *Condición:* Precio sobre EMA 200 y RSI ({rsi_now:.1f}) saliendo de sobreventa."
-        )
-        send_telegram_alert(msg)
-        last_alerted_candle_time = candle_timestamp
-
-    # Señal de VENTA (SHORT)
-    elif price < ema and rsi_prev >= 65 and rsi_now < 65:
-        sl = round(price * 1.015, 2)
-        tp = round(price * 0.970, 2)
-        msg = (
-            f"🔻 *SEÑAL SHORT CONFIRMADA: {SYMBOL}*\n\n"
-            f"• *Temporalidad:* {TIMEFRAME}\n"
-            f"• *Precio Entrada:* ${price:.2f}\n"
-            f"• *Stop-Loss (SL):* ${sl:.2f} (-1.5%)\n"
-            f"• *Take-Profit (TP):* ${tp:.2f} (+3.0%)\n"
-            f"• *Ratio Riesgo/Beneficio:* 1:2\n\n"
-            f"📊 *Condición:* Precio bajo EMA 200 y RSI ({rsi_now:.1f}) perdiendo sobrecompra."
-        )
-        send_telegram_alert(msg)
-        last_alerted_candle_time = candle_timestamp
-
+# ==========================================
+# 5. BUCLE PRINCIPAL DE ANÁLISIS
+# ==========================================
 def bot_loop():
-    """Bucle continuo de trading en segundo plano."""
-    print("📡 Monitoreo de Binance iniciado en segundo plano...")
-    send_telegram_alert("🟢 *Bot de Señales SOL activado en la nube.*")
+    time.sleep(5)  # Breve pausa para asegurar el arranque del servidor web
     
+    startup_msg = (
+        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
+        "⚡ <b>SISTEMA DE SEÑALES ACTIVO</b>\n"
+        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+        f"💎 <b>Activo:</b> <code>{SYMBOL}</code>\n"
+        f"⏱ <b>Temporalidad:</b> <code>{TIMEFRAME}</code>\n"
+        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
+        "📡 <i>Escaneando el mercado en segundo plano...</i>"
+    )
+    send_telegram_alert(startup_msg)
+
+    exchange = ccxt.binance({"enableRateLimit": True})
+    last_signal_timestamp = None
+
     while True:
         try:
-            scan_market()
+            # Descarga de datos OHLCV
+            candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT_CANDLES)
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = calculate_indicators(df)
+
+            # Tomar las últimas velas cerradas para confirmación
+            current_candle = df.iloc[-2]   # Última vela cerrada completamente
+            prev_candle = df.iloc[-3]      # Penúltima vela cerrada
+
+            candle_time = current_candle['timestamp']
+            price = current_candle['close']
+            ema = current_candle['ema200']
+            rsi = current_candle['rsi']
+            prev_rsi = prev_candle['rsi']
+
+            if candle_time != last_signal_timestamp:
+                # Condición 1: LONG (Precio > EMA 200 y rebote alcista de RSI saliendo de 35)
+                if price > ema and prev_rsi < 35 and rsi >= 35:
+                    sl = price * (1 - SL_PCT)
+                    tp = price * (1 + TP_PCT)
+                    
+                    alert_long = (
+                        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
+                        "🟢 <b>NUEVA SEÑAL · SOL/USDT</b>\n"
+                        "<i>(Largo / Compra)</i>\n"
+                        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                        f"🎯 <b>Precio Entrada:</b> <code>{price:.2f}</code>\n"
+                        f"🛡️ <b>Stop-Loss (-1.5%):</b> <code>{sl:.2f}</code>\n"
+                        f"💰 <b>Take-Profit (+3.0%):</b> <code>{tp:.2f}</code>\n\n"
+                        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
+                        "📊 <b>Ratio Riesgo/Beneficio:</b> <code>1:2</code>\n"
+                        f"📈 <b>Filtro:</b> Precio > EMA200 | RSI ({rsi:.1f}) saliendo de sobreventa."
+                    )
+                    send_telegram_alert(alert_long)
+                    last_signal_timestamp = candle_time
+
+                # Condición 2: SHORT (Precio < EMA 200 y quiebre bajista de RSI cayendo de 65)
+                elif price < ema and prev_rsi > 65 and rsi <= 65:
+                    sl = price * (1 + SL_PCT)
+                    tp = price * (1 - TP_PCT)
+                    
+                    alert_short = (
+                        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
+                        "🔴 <b>NUEVA SEÑAL · SOL/USDT</b>\n"
+                        "<i>(Corto / Venta)</i>\n"
+                        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+                        f"🎯 <b>Precio Entrada:</b> <code>{price:.2f}</code>\n"
+                        f"🛡️ <b>Stop-Loss (-1.5%):</b> <code>{sl:.2f}</code>\n"
+                        f"💰 <b>Take-Profit (+3.0%):</b> <code>{tp:.2f}</code>\n\n"
+                        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
+                        "📊 <b>Ratio Riesgo/Beneficio:</b> <code>1:2</code>\n"
+                        f"📉 <b>Filtro:</b> Precio < EMA200 | RSI ({rsi:.1f}) saliendo de sobrecompra."
+                    )
+                    send_telegram_alert(alert_short)
+                    last_signal_timestamp = candle_time
+
         except Exception as e:
-            print(f"Error en consulta de velas: {e}")
+            print(f"Error al analizar el mercado: {e}")
+
+        # Pausa de 60 segundos antes de volver a consultar
         time.sleep(60)
 
 # ==========================================
-# 3. ARRANQUE SIMULTÁNEO (FLASK + BOT)
+# 6. ARRANQUE
 # ==========================================
-if __name__ == "__main__":
-    # Inicia el escaneo en un hilo paralelo
-    threading.Thread(target=bot_loop, daemon=True).start()
-    # Inicia el servidor web principal
-    run_web()
+if __name__ == '__main__':
+    t = threading.Thread(target=bot_loop)
+    t.daemon = True
+    t.start()
+    run_flask()
