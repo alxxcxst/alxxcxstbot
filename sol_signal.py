@@ -7,7 +7,7 @@ import ccxt
 from flask import Flask
 
 # ==========================================
-# 1. CONFIGURACIÓN Y CREDENCIALES
+# 1. PARÁMETROS Y CREDENCIALES
 # ==========================================
 TELEGRAM_BOT_TOKEN = "9177159589:AAEdG7oQpKfAQO6osw9AtO4HwgJJW43B4dE"
 TELEGRAM_CHAT_ID = "8459722038"
@@ -18,44 +18,65 @@ LIMIT_CANDLES = 250
 
 SL_PCT = 0.015  # -1.5% Stop Loss
 TP_PCT = 0.030  # +3.0% Take Profit
+BE_PCT = 0.015  # +1.5% Activación Break-Even
 LEVERAGE = "6x"
 
+PHANTOM_URL = "https://phantom.app/ul/browse/https%3A%2F%2Fphantom.app"
+TRADINGVIEW_URL = "https://www.tradingview.com/chart/?symbol=BINANCE%3ASOLUSDT"
+
+# Variables de seguimiento
+active_trade = None
+last_processed_candle = None
+candles_scanned_count = 0
+
 # ==========================================
-# 2. SERVIDOR WEB FLASK (KEEP-ALIVE)
+# 2. SERVIDOR KEEP-ALIVE (FLASK)
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot de Señales SOL activo y monitoreando el mercado 24/7.", 200
+    return "SOL Alpha Bot activo y en línea.", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
 # ==========================================
-# 3. ENVÍO DE ALERTAS CON HTML A TELEGRAM
+# 3. INTERFAZ TELEGRAM (HTML & BOTONES)
 # ==========================================
-def send_telegram_alert(message):
+def send_telegram_alert(message, reply_markup=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error enviando mensaje a Telegram: {e}")
+        print(f"Error de red con Telegram: {e}")
+
+def get_action_buttons():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⚡ Abrir Phantom", "url": PHANTOM_URL},
+                {"text": "📈 TradingView", "url": TRADINGVIEW_URL}
+            ]
+        ]
+    }
 
 # ==========================================
-# 4. CÁLCULO DE INDICADORES MATEMÁTICOS
+# 4. MOTOR DE INDICADORES
 # ==========================================
 def calculate_indicators(df):
-    # Media Móvil Exponencial (EMA 200)
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    df['vol_ma20'] = df['volume'].rolling(20).mean()
 
-    # Índice de Fuerza Relativa (RSI 14)
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -68,94 +89,60 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# 5. BUCLE PRINCIPAL DE ANÁLISIS
+# 5. LISTENER DE COMANDOS
 # ==========================================
-def bot_loop():
-    time.sleep(5)  # Breve pausa para asegurar el arranque del servidor web
-    
-    startup_msg = (
-        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
-        "⚡ <b>SISTEMA DE SEÑALES ACTIVO</b>\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-        f"💎 <b>Activo:</b> <code>{SYMBOL}</code>\n"
-        f"⏱ <b>Temporalidad:</b> <code>{TIMEFRAME}</code>\n"
-        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
-        "📡 <i>Escaneando el mercado en segundo plano...</i>"
-    )
-    send_telegram_alert(startup_msg)
-
+def telegram_listener():
+    offset = 0
     exchange = ccxt.binance({"enableRateLimit": True})
-    last_signal_timestamp = None
-
+    
     while True:
         try:
-            # Descarga de datos OHLCV
-            candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=LIMIT_CANDLES)
-            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df = calculate_indicators(df)
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
+            res = requests.get(url, timeout=25).json()
+            
+            if "result" in res:
+                for update in res["result"]:
+                    offset = update["update_id"] + 1
+                    msg = update.get("message", {})
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    text = msg.get("text", "").strip().lower()
 
-            # Tomar las últimas velas cerradas para confirmación
-            current_candle = df.iloc[-2]   # Última vela cerrada completamente
-            prev_candle = df.iloc[-3]      # Penúltima vela cerrada
+                    if chat_id != TELEGRAM_CHAT_ID:
+                        continue
 
-            candle_time = current_candle['timestamp']
-            price = current_candle['close']
-            ema = current_candle['ema200']
-            rsi = current_candle['rsi']
-            prev_rsi = prev_candle['rsi']
+                    if text == "/precio":
+                        candles = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=210)
+                        df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df = calculate_indicators(df)
+                        c = df.iloc[-1]
+                        
+                        trend_badge = "🟢 LONG Bias (Sobre EMA 200)" if c['close'] > c['ema200'] else "🔴 SHORT Bias (Bajo EMA 200)"
+                        
+                        resp = (
+                            "📊 <b>SOLANA · MONITOR DE MERCADO</b>\n"
+                            "────────────────────────────\n"
+                            f"▫️ <b>Precio Spot:</b> <code>${c['close']:.2f}</code>\n"
+                            f"▫️ <b>EMA 200:</b>      <code>${c['ema200']:.2f}</code>\n"
+                            f"▫️ <b>RSI (14):</b>     <code>{c['rsi']:.1f}</code>\n"
+                            f"▫️ <b>Sesgo:</b>        {trend_badge}\n"
+                            "────────────────────────────"
+                        )
+                        send_telegram_alert(resp, reply_markup=get_action_buttons())
 
-            if candle_time != last_signal_timestamp:
-                # Condición 1: LONG (Precio > EMA 200 y rebote alcista de RSI saliendo de 35)
-                if price > ema and prev_rsi < 35 and rsi >= 35:
-                    sl = price * (1 - SL_PCT)
-                    tp = price * (1 + TP_PCT)
-                    
-                    alert_long = (
-                        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
-                        "🟢 <b>NUEVA SEÑAL · SOL/USDT</b>\n"
-                        "<i>(Largo / Compra)</i>\n"
-                        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-                        f"🎯 <b>Precio Entrada:</b> <code>{price:.2f}</code>\n"
-                        f"🛡️ <b>Stop-Loss (-1.5%):</b> <code>{sl:.2f}</code>\n"
-                        f"💰 <b>Take-Profit (+3.0%):</b> <code>{tp:.2f}</code>\n\n"
-                        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
-                        "📊 <b>Ratio Riesgo/Beneficio:</b> <code>1:2</code>\n"
-                        f"📈 <b>Filtro:</b> Precio > EMA200 | RSI ({rsi:.1f}) saliendo de sobreventa."
-                    )
-                    send_telegram_alert(alert_long)
-                    last_signal_timestamp = candle_time
+                    elif text == "/status":
+                        trade_badge = "Sin posiciones activas"
+                        if active_trade:
+                            trade_badge = f"{active_trade['type']} @ ${active_trade['entry']:.2f}"
 
-                # Condición 2: SHORT (Precio < EMA 200 y quiebre bajista de RSI cayendo de 65)
-                elif price < ema and prev_rsi > 65 and rsi <= 65:
-                    sl = price * (1 + SL_PCT)
-                    tp = price * (1 - TP_PCT)
-                    
-                    alert_short = (
-                        "┏━━━━━━━━━━━━━━━━━━━━━┓\n"
-                        "🔴 <b>NUEVA SEÑAL · SOL/USDT</b>\n"
-                        "<i>(Corto / Venta)</i>\n"
-                        "┗━━━━━━━━━━━━━━━━━━━━━┛\n\n"
-                        f"🎯 <b>Precio Entrada:</b> <code>{price:.2f}</code>\n"
-                        f"🛡️ <b>Stop-Loss (-1.5%):</b> <code>{sl:.2f}</code>\n"
-                        f"💰 <b>Take-Profit (+3.0%):</b> <code>{tp:.2f}</code>\n\n"
-                        f"⚙️ <b>Apalancamiento:</b> <code>{LEVERAGE}</code>\n"
-                        "📊 <b>Ratio Riesgo/Beneficio:</b> <code>1:2</code>\n"
-                        f"📉 <b>Filtro:</b> Precio < EMA200 | RSI ({rsi:.1f}) saliendo de sobrecompra."
-                    )
-                    send_telegram_alert(alert_short)
-                    last_signal_timestamp = candle_time
+                        resp = (
+                            "⚡ <b>CENTRO DE ESTADO · NUBE</b>\n"
+                            "────────────────────────────\n"
+                            "▫️ <b>Servidor:</b>   Render · En línea (200 OK)\n"
+                            "▫️ <b>Keep-Alive:</b> UptimeRobot activo\n"
+                            f"▫️ <b>Ciclos:</b>       {candles_scanned_count} velas analizadas\n"
+                            f"▫️ <b>Trade activo:</b> <code>{trade_badge}</code>\n"
+                            "────────────────────────────"
+                        )
+                        send_telegram_alert(resp)
 
-        except Exception as e:
-            print(f"Error al analizar el mercado: {e}")
-
-        # Pausa de 60 segundos antes de volver a consultar
-        time.sleep(60)
-
-# ==========================================
-# 6. ARRANQUE
-# ==========================================
-if __name__ == '__main__':
-    t = threading.Thread(target=bot_loop)
-    t.daemon = True
-    t.start()
-    run_flask()
+                    elif text in ["/start
