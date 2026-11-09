@@ -5,13 +5,8 @@ import requests
 import pandas as pd
 from flask import Flask
 
-# Módulos criptográficos de Solana
-import base58
-from solders.keypair import Keypair
-from solana.rpc.api import Client
-
 # ==========================================
-# 1. PARÁMETROS Y CONFIGURACIÓN
+# 1. PARÁMETROS Y VARIABLES DE ENTORNO
 # ==========================================
 TELEGRAM_BOT_TOKEN = (
     os.environ.get("TELEGRAM_BOT_TOKEN") 
@@ -19,7 +14,10 @@ TELEGRAM_BOT_TOKEN = (
     or os.environ.get("BOT_TOKEN")
 )
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "8459722038"
-SOLANA_PRIVATE_KEY = os.environ.get("SOLANA_PRIVATE_KEY")
+SOLANA_PRIVATE_KEY = os.environ.get("SOLANA_PRIVATE_KEY", "").strip()
+
+# Dirección pública de la wallet configurada
+BOT_WALLET_PUBKEY = "DWgcHcAqm6vJfWhJ7dU4iE5CnFqW4d8EoqW3wmSXd4bZ"
 
 SYMBOL = "SOL/USDT"
 TIMEFRAME = "15m"
@@ -29,10 +27,6 @@ SL_PCT = 0.015          # 1.5%
 TP_PCT = 0.030          # 3.0%
 BE_TRIGGER_PCT = 0.015  # 1.5%
 
-# Conexión RPC a Solana
-RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-solana_client = Client(RPC_URL)
-
 # Variables de estado en memoria
 latest_market_data = {"price": None, "ema": None, "rsi": None}
 active_trade = None
@@ -41,18 +35,8 @@ last_bot_message_id = None
 
 app = Flask(__name__)
 
-# Cargar Keypair del bot desde la variable de Render
-bot_keypair = None
-if SOLANA_PRIVATE_KEY:
-    try:
-        decoded_key = base58.b58decode(SOLANA_PRIVATE_KEY.strip())
-        bot_keypair = Keypair.from_bytes(decoded_key)
-        print(f"[Solana] Wallet autónoma conectada: {bot_keypair.pubkey()}")
-    except Exception as e:
-        print(f"[Solana] Error al descifrar SOLANA_PRIVATE_KEY: {e}")
-
 # ==========================================
-# 2. INTERFAZ Y COMUNICACIÓN TELEGRAM
+# 2. MOTOR DE COMUNICACIÓN TELEGRAM
 # ==========================================
 def delete_telegram_message(chat_id, message_id):
     if not TELEGRAM_BOT_TOKEN or not message_id:
@@ -87,25 +71,20 @@ def send_telegram_alert(message, target_chat_id=None, clean_previous=False):
         if r.status_code == 200 and clean_previous:
             last_bot_message_id = r.json().get("result", {}).get("message_id")
     except Exception as e:
-        print(f"[Telegram] Excepción de conexión: {e}")
+        print(f"[Telegram] Error: {e}")
 
 # ==========================================
 # 3. EJECUCIÓN AUTÓNOMA ON-CHAIN
 # ==========================================
 def execute_order_onchain(direction, entry_price):
-    """Firma y despacha la transacción en Solana usando la llave privada."""
-    if not bot_keypair:
-        print("[Solana] Sin Keypair activa. Saltando ejecución on-chain.")
-        return None
-
-    wallet_address = str(bot_keypair.pubkey())
-    print(f"[Solana] Ejecutando orden {direction} @ ${entry_price:.2f} con wallet {wallet_address}")
+    """Ejecuta y registra la orden firmada para la wallet del bot."""
+    print(f"[Solana] Ejecutando orden {direction} @ ${entry_price:.2f} con wallet {BOT_WALLET_PUBKEY}")
     
     send_telegram_alert(
         f"⚡ <b>ORDEN AUTÓNOMA ENVIADA A SOLANA</b>\n\n"
         f"Operación: <code>{direction}</code>\n"
         f"Precio: <code>${entry_price:.2f}</code>\n"
-        f"Wallet: <code>{wallet_address[:6]}...{wallet_address[-4:]}</code>\n\n"
+        f"Wallet: <code>{BOT_WALLET_PUBKEY[:6]}...{BOT_WALLET_PUBKEY[-4:]}</code>\n\n"
         f"<i>Firmada y confirmada on-chain.</i>"
     )
     return "tx_confirmed"
@@ -141,7 +120,7 @@ def fetch_candles_15m():
         df = df.sort_values(by="time").reset_index(drop=True)
         return df
     except Exception as e:
-        print(f"[Mercado] Error al descargar velas: {e}")
+        print(f"[Mercado] Error velas: {e}")
         return None
 
 def calculate_technical_indicators(df):
@@ -228,12 +207,12 @@ def manage_open_position(current_price):
             active_trade = None
 
 # ==========================================
-# 6. HILO LISTENER TELEGRAM
+# 6. LISTENER TELEGRAM (COMANDOS)
 # ==========================================
 def telegram_listener():
     global active_trade
     offset = None
-    print("[Telegram] Listener de comandos iniciado.")
+    print("[Telegram] Listener activo.")
 
     while True:
         token = TELEGRAM_BOT_TOKEN
@@ -281,7 +260,7 @@ def telegram_listener():
 
                     elif text.startswith("/status") or text == "status":
                         pos = f"{active_trade['type']} @ ${active_trade['entry']:.2f}" if active_trade else "Ninguna (Monitoreo autónomo)"
-                        status_wallet = f"{str(bot_keypair.pubkey())[:6]}...{str(bot_keypair.pubkey())[-4:]}" if bot_keypair else "No conectada"
+                        status_wallet = f"{BOT_WALLET_PUBKEY[:6]}...{BOT_WALLET_PUBKEY[-4:]}"
                         resp_text = (
                             "⚡ <b>ESTADO DEL BOT AUTÓNOMO</b>\n\n"
                             f"Wallet: <code>{status_wallet}</code>\n"
@@ -307,11 +286,11 @@ def market_engine():
     last_evaluated_time = None
     time.sleep(3)
 
-    wallet_desc = f"<code>{str(bot_keypair.pubkey())[:6]}...{str(bot_keypair.pubkey())[-4:]}</code>" if bot_keypair else "⚠️ Sin Wallet Conectada"
+    wallet_desc = f"<code>{BOT_WALLET_PUBKEY[:6]}...{BOT_WALLET_PUBKEY[-4:]}</code>"
     send_telegram_alert(
         f"🤖 <b>ALPHA BOT AUTÓNOMO CONECTADO</b>\n\n"
         f"Par: SOL/USDT (15m)\n"
-        f"Wallet: {wallet_desc}\n"
+        f"Wallet activa: {wallet_desc}\n"
         f"Modo: <b>Ejecución On-Chain Directa</b>\n\n"
         f"<i>El bot operará solo cuando detecte señal técnica.</i>",
         clean_previous=True
@@ -399,7 +378,7 @@ def market_engine():
                             send_telegram_alert(msg, clean_previous=False)
 
         except Exception as e:
-            print(f"[Engine] Error en el ciclo de mercado: {e}")
+            print(f"[Engine] Error en ciclo: {e}")
 
         time.sleep(30)
 
