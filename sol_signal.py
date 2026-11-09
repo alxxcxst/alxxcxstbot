@@ -22,6 +22,10 @@ BOT_WALLET_PUBKEY = "DWgcHcAqm6vJfWhJ7dU4iE5CnFqW4d8EoqW3wmSXd4bZ"
 SYMBOL = "SOL/USDT"
 TIMEFRAME = "15m"
 
+# Gestión de capital y tamaño de posición (Variables dinámicas)
+MARGIN_USDC = float(os.environ.get("MARGIN_USDC", "2.0"))  # Margen base ($2.00 USDC)
+LEVERAGE = int(os.environ.get("LEVERAGE", "6"))            # Apalancamiento base (6x)
+
 # Gestión de riesgo R:R 1:2
 SL_PCT = 0.015          # 1.5%
 TP_PCT = 0.030          # 3.0%
@@ -78,11 +82,14 @@ def send_telegram_alert(message, target_chat_id=None, clean_previous=False):
 # ==========================================
 def execute_order_onchain(direction, entry_price):
     """Ejecuta y registra la orden firmada para la wallet del bot."""
-    print(f"[Solana] Ejecutando orden {direction} @ ${entry_price:.2f} con wallet {BOT_WALLET_PUBKEY}")
+    notional = MARGIN_USDC * LEVERAGE
+    print(f"[Solana] Orden {direction} @ ${entry_price:.2f} | Margen: ${MARGIN_USDC:.2f} USDC ({LEVERAGE}x)")
     
     send_telegram_alert(
         f"⚡ <b>ORDEN AUTÓNOMA ENVIADA A SOLANA</b>\n\n"
         f"Operación: <code>{direction}</code>\n"
+        f"Margen: <code>${MARGIN_USDC:.2f} USDC ({LEVERAGE}x)</code>\n"
+        f"Posición Nocional: <code>${notional:.2f} USD</code>\n"
         f"Precio: <code>${entry_price:.2f}</code>\n"
         f"Wallet: <code>{BOT_WALLET_PUBKEY[:6]}...{BOT_WALLET_PUBKEY[-4:]}</code>\n\n"
         f"<i>Firmada y confirmada on-chain.</i>"
@@ -264,6 +271,7 @@ def telegram_listener():
                         resp_text = (
                             "⚡ <b>ESTADO DEL BOT AUTÓNOMO</b>\n\n"
                             f"Wallet: <code>{status_wallet}</code>\n"
+                            f"Margen por trade: <code>${MARGIN_USDC:.2f} USDC ({LEVERAGE}x)</code>\n"
                             f"Velas escaneadas: {candles_scanned_count}\n"
                             f"Posición activa: <code>{pos}</code>"
                         )
@@ -291,6 +299,7 @@ def market_engine():
         f"🤖 <b>ALPHA BOT AUTÓNOMO CONECTADO</b>\n\n"
         f"Par: SOL/USDT (15m)\n"
         f"Wallet activa: {wallet_desc}\n"
+        f"Margen configurado: <code>${MARGIN_USDC:.2f} USDC ({LEVERAGE}x)</code>\n"
         f"Modo: <b>Ejecución On-Chain Directa</b>\n\n"
         f"<i>El bot operará solo cuando detecte señal técnica.</i>",
         clean_previous=True
@@ -343,9 +352,9 @@ def market_engine():
 
                             msg = (
                                 "🟢 <b>ORDEN EJECUTADA · LONG</b> 🔼\n\n"
-                                f"Entrada: <code>{entry:.2f}</code>\n"
-                                f"TP (+3.0%): <code>{tp:.2f}</code>\n"
-                                f"SL (-1.5%): <code>{sl:.2f}</code>\n\n"
+                                f"Entrada: <code>${entry:.2f}</code>\n"
+                                f"TP (+3.0%): <code>${tp:.2f}</code>\n"
+                                f"SL (-1.5%): <code>${sl:.2f}</code>\n\n"
                                 f"Filtro: RSI {rsi_val:.1f} + Volumen Confirmado\n"
                                 f"<i>Operación ejecutada en Solana.</i>"
                             )
@@ -369,9 +378,9 @@ def market_engine():
 
                             msg = (
                                 "🔴 <b>ORDEN EJECUTADA · SHORT</b> 🔽\n\n"
-                                f"Entrada: <code>{entry:.2f}</code>\n"
-                                f"TP (+3.0%): <code>{tp:.2f}</code>\n"
-                                f"SL (-1.5%): <code>{sl:.2f}</code>\n\n"
+                                f"Entrada: <code>${entry:.2f}</code>\n"
+                                f"TP (+3.0%): <code>${tp:.2f}</code>\n"
+                                f"SL (-1.5%): <code>${sl:.2f}</code>\n\n"
                                 f"Filtro: RSI {rsi_val:.1f} + Volumen Confirmado\n"
                                 f"<i>Operación ejecutada en Solana.</i>"
                             )
