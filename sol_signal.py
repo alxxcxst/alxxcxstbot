@@ -26,7 +26,9 @@ TELEGRAM_BOT_TOKEN = (
 )
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "8459722038"
 SOLANA_PRIVATE_KEY = os.environ.get("SOLANA_PRIVATE_KEY", "").strip()
-RPC_URL = os.environ.get("RPC_URL", "https://api.mainnet-beta.solana.com")
+
+# Lee tu RPC privado configurado en Render (Helius)
+RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=e7f1c1a9-1290-46d2-ac8a-5c783fb25a83")
 
 BOT_WALLET_PUBKEY = "DWgcHcAqm6vJfWhJ7dU4iE5CnFqW4d8EoqW3wmSXd4bZ"
 
@@ -111,6 +113,7 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
         ASSOC_TOKEN_PROGRAM_ID
     )
     return pda
+
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     rpc_payload = {
         "jsonrpc": "2.0",
@@ -147,7 +150,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     }
     
     res = requests.post(RPC_URL, json=send_payload, timeout=15).json()
-    print(f"[RPC Response CRUDA]: {res}") # Esto saldrá en los logs de Render para ver qué falló exactamente
     
     if "error" in res:
         raise Exception(str(res["error"]))
@@ -176,7 +178,6 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Para LONG usamos SOL como colateral; para SHORT usamos USDC para evitar el error de cuenta no inicializada
         target_custody = SOL_CUSTODY
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
@@ -216,7 +217,6 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        # Si es SHORT, ambas custodias de las cuentas de programa deben apuntar a USDC_CUSTODY para satisfacer la inicialización del pool
         effective_target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
         accounts = [
