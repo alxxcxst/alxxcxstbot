@@ -118,8 +118,11 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
         "method": "getLatestBlockhash",
         "params": [{"commitment": "confirmed"}]
     }
-    res_bh = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
-    latest_blockhash_str = res_bh["result"]["value"]["blockhash"]
+    bh_res = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+    if "result" not in bh_res:
+        raise Exception(f"Error obteniendo blockhash: {bh_res}")
+        
+    latest_blockhash_str = bh_res["result"]["value"]["blockhash"]
     latest_blockhash = Hash.from_string(latest_blockhash_str)
 
     msg = MessageV0.try_compile(
@@ -142,21 +145,17 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
             {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "confirmed"}
         ]
     }
-    res_send = requests.post(RPC_URL, json=send_payload, timeout=10).json()
     
-    if "error" in res_send:
-        raise Exception(str(res_send["error"]))
+    res = requests.post(RPC_URL, json=send_payload, timeout=15).json()
+    print(f"[RPC Response CRUDA]: {res}") # Esto saldrá en los logs de Render para ver qué falló exactamente
+    
+    if "error" in res:
+        raise Exception(str(res["error"]))
         
-    # Extracción blindada del hash de la transacción
-    if "result" in res_send:
-        res_val = res_send["result"]
-        if isinstance(res_val, str):
-            return res_val
-        elif isinstance(res_val, dict):
-            return res_val.get("value", "tx_enviada_exitosamente")
-        return str(res_val)
-    
-    return "tx_enviada_exitosamente"
+    if "result" in res:
+        return str(res["result"])
+        
+    raise Exception(f"Respuesta RPC desconocida: {res}")
 
 def execute_order_onchain(direction: str, entry_price: float):
     """Envía un Market Request (LONG o SHORT) al contrato de Jupiter Perps."""
