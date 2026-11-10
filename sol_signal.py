@@ -139,16 +139,14 @@ def execute_order_onchain(direction: str, entry_price: float):
         owner = kp.pubkey()
 
         notional_usd = MARGIN_USDC * LEVERAGE
-        size_usd_delta = int(notional_usd * 1_000_000)       # 6 decimales USD en Jupiter
-        collateral_delta = int(MARGIN_USDC * 1_000_000)      # 6 decimales USDC
-        side_byte = 1 if direction == "LONG" else 2          # 1 = Long, 2 = Short
+        size_usd_delta = int(notional_usd * 1_000_000)
+        collateral_delta = int(MARGIN_USDC * 1_000_000)
+        side_byte = 1 if direction == "LONG" else 2
 
-        # Slippage de protección del 1.2% para ejecución del Keeper
         slippage_price = entry_price * (1.012 if direction == "LONG" else 0.988)
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # En Jupiter Perps: Long SOL usa custodia colateral SOL; Short SOL usa custodia USDC
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
@@ -171,7 +169,7 @@ def execute_order_onchain(direction: str, entry_price: float):
                 b"position_request",
                 bytes(position_pda),
                 struct.pack("<Q", counter),
-                b"\x01",  # 1 = IncreasePosition
+                b"\x01",
             ],
             JUP_PERPS_PROGRAM_ID,
         )
@@ -179,9 +177,7 @@ def execute_order_onchain(direction: str, entry_price: float):
         funding_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        # Discriminador Anchor: global:create_increase_position_market_request
         disc = hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8]
-        # Serialización Borsh de parámetros (Option<u64> None = \x00)
         data = (
             disc
             + struct.pack("<QQBQ", size_usd_delta, collateral_delta, side_byte, price_slippage_int)
@@ -200,7 +196,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(SOL_CUSTODY, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
-            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),  # referral (None)
+            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(ASSOC_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -247,7 +243,7 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
                 b"position_request",
                 bytes(position_pda),
                 struct.pack("<Q", counter),
-                b"\x02",  # 2 = DecreasePosition
+                b"\x02",
             ],
             JUP_PERPS_PROGRAM_ID,
         )
@@ -256,7 +252,6 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
         disc = hashlib.sha256(b"global:create_decrease_position_market_request").digest()[:8]
-        # collateral_usd_delta=0, size_usd_delta=0, price_slippage, min_out=None(\x00), entire_pos=Some(True)(\x01\x01)
         data = (
             disc
             + struct.pack("<QQQ", 0, 0, price_slippage_int)
@@ -338,7 +333,6 @@ def calculate_technical_indicators(df):
     close = df["close"]
     df["ema_200"] = close.ewm(span=200, adjust=False).mean()
 
-    # RSI de Wilder exacto (14 periodos)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -426,7 +420,7 @@ def telegram_listener():
                     msg_id = msg.get("message_id")
                     text = msg.get("text", "").strip().lower()
 
-                    if msg_id and (text.startswith("/") or text in ["precio", "status", "reset", "close"]):
+                    if msg_id and (text.startswith("/") or text in ["precio", "status", "reset", "close", "test", "testlong", "testshort"]):
                         delete_telegram_message(chat_id, msg_id)
 
                     if text.startswith("/precio") or text == "precio":
@@ -460,13 +454,60 @@ def telegram_listener():
                         )
                         send_telegram_alert(resp_text, target_chat_id=chat_id, clean_previous=True)
 
+                    # COMANDO TEST LONG MANUAL
+                    elif text in ["/test", "/testlong", "test"]:
+                        if active_trade:
+                            send_telegram_alert("⚠️ Ya hay una posición activa. Ciérrala primero con /close antes de hacer un test.", target_chat_id=chat_id, clean_previous=True)
+                        else:
+                            p = latest_market_data.get("price") or get_live_sol_price()
+                            if p:
+                                send_telegram_alert("🧪 <b>Ejecutando TEST LONG manual en Jupiter Perps...</b>", target_chat_id=chat_id, clean_previous=True)
+                                tp = round(p * (1 + TP_PCT), 2)
+                                sl = round(p * (1 - SL_PCT), 2)
+                                pos_pda = execute_order_onchain("LONG", p)
+                                if pos_pda:
+                                    active_trade = {
+                                        "type": "LONG",
+                                        "entry": p,
+                                        "tp": tp,
+                                        "sl": sl,
+                                        "position_pda": pos_pda,
+                                        "be_activated": False
+                                    }
+                            else:
+                                send_telegram_alert("❌ Error obteniendo precio en vivo para el test.", target_chat_id=chat_id, clean_previous=True)
+
+                    # COMANDO TEST SHORT MANUAL
+                    elif text == "/testshort":
+                        if active_trade:
+                            send_telegram_alert("⚠️ Ya hay una posición activa. Ciérrala primero con /close.", target_chat_id=chat_id, clean_previous=True)
+                        else:
+                            p = latest_market_data.get("price") or get_live_sol_price()
+                            if p:
+                                send_telegram_alert("🧪 <b>Ejecutando TEST SHORT manual en Jupiter Perps...</b>", target_chat_id=chat_id, clean_previous=True)
+                                tp = round(p * (1 - TP_PCT), 2)
+                                sl = round(p * (1 + SL_PCT), 2)
+                                pos_pda = execute_order_onchain("SHORT", p)
+                                if pos_pda:
+                                    active_trade = {
+                                        "type": "SHORT",
+                                        "entry": p,
+                                        "tp": tp,
+                                        "sl": sl,
+                                        "position_pda": pos_pda,
+                                        "be_activated": False
+                                    }
+                            else:
+                                send_telegram_alert("❌ Error obteniendo precio en vivo.", target_chat_id=chat_id, clean_previous=True)
+
+                    # COMANDO CLOSE (Cierra la posición real en la blockchain)
                     elif text.startswith("/close") or text == "close":
                         if active_trade:
                             p = latest_market_data.get("price") or get_live_sol_price() or active_trade["entry"]
                             if close_position_onchain(active_trade, p, "⚠️ <b>CIERRE MANUAL POR TELEGRAM</b>"):
                                 active_trade = None
                         else:
-                            send_telegram_alert("ℹ️ No hay ninguna posición abierta.", target_chat_id=chat_id, clean_previous=True)
+                            send_telegram_alert("ℹ️ No hay ninguna posición abierta para cerrar.", target_chat_id=chat_id, clean_previous=True)
 
                     elif text.startswith("/reset") or text == "reset":
                         active_trade = None
@@ -491,7 +532,7 @@ def market_engine():
         f"Mercado: <b>{SYMBOL} (15m)</b>\n"
         f"Wallet Phantom: {wallet_desc}\n"
         f"Posición por trade: <code>${MARGIN_USDC:.2f} USDC a {LEVERAGE}x (${MARGIN_USDC*LEVERAGE:.2f} USD)</code>\n"
-        f"Comandos: <code>/precio</code> | <code>/status</code> | <code>/close</code>",
+        f"Comandos: <code>/precio</code> | <code>/status</code> | <code>/test</code> | <code>/close</code>",
         clean_previous=True
     )
 
