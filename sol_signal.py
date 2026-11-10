@@ -27,7 +27,7 @@ TELEGRAM_BOT_TOKEN = (
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "8459722038"
 SOLANA_PRIVATE_KEY = os.environ.get("SOLANA_PRIVATE_KEY", "").strip()
 
-# Lee tu RPC privado configurado en Render (Helius)
+# RPC privado configurado en Render (Helius)
 RPC_URL = os.environ.get("RPC_URL", "https://mainnet.helius-rpc.com/?api-key=e7f1c1a9-1290-46d2-ac8a-5c783fb25a83")
 
 BOT_WALLET_PUBKEY = "DWgcHcAqm6vJfWhJ7dU4iE5CnFqW4d8EoqW3wmSXd4bZ"
@@ -39,11 +39,11 @@ TIMEFRAME = "15m"
 MARGIN_USDC = float(os.environ.get("MARGIN_USDC", "2.0"))
 LEVERAGE = int(os.environ.get("LEVERAGE", "6"))
 
-# Gestión de riesgo R:R 1:2 ajustada para cubrir Keeper fee de Jupiter Perps
+# Gestión de riesgo R:R 1:2
 SL_PCT = 0.015          # 1.5% Stop Loss
 TP_PCT = 0.030          # 3.0% Take Profit
 BE_TRIGGER_PCT = 0.020  # Activar Break-Even al +2.0%
-BE_OFFSET_PCT = 0.003   # Proteger en +0.3% sobre entrada para cubrir fees on-chain
+BE_OFFSET_PCT = 0.003   # Proteger en +0.3% sobre entrada
 
 # Constantes del Contrato Inteligente de Jupiter Perpetuals (Mainnet)
 JUP_PERPS_PROGRAM_ID = Pubkey.from_string("PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu")
@@ -53,7 +53,7 @@ USDC_CUSTODY = Pubkey.from_string("G18jKKXQwBbrHeiK3C9MRXhkHsugf7XgCSisykV46EZa"
 SOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
 USDC_MINT = Pubkey.from_string("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
 
-# Cuentas de Oráculo Pyth oficiales asociadas en Jupiter Perps para SOL y USDC
+# Oráculos Pyth oficiales
 SOL_ORACLE = Pubkey.from_string("H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG")
 USDC_ORACLE = Pubkey.from_string("Gnt27XTJ473HcbMV5TPnbcQ5b4n6p7e4hA8y66c2tGgN")
 
@@ -182,17 +182,13 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Configuración de custodias y oráculos según dirección
-        if direction == "LONG":
-            target_custody = SOL_CUSTODY
-            collateral_custody = SOL_CUSTODY
-            target_oracle = SOL_ORACLE
-            collateral_oracle = SOL_ORACLE
-        else:
-            target_custody = SOL_CUSTODY
-            collateral_custody = USDC_CUSTODY
-            target_oracle = SOL_ORACLE
-            collateral_oracle = USDC_ORACLE
+        # Para LONG y SHORT en SOL-PERP:
+        # El mercado subyacente es SOL_CUSTODY. 
+        # Para LONG el colateral es SOL_CUSTODY; para SHORT el colateral es USDC_CUSTODY.
+        target_custody = SOL_CUSTODY
+        collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        target_oracle = SOL_ORACLE
+        collateral_oracle = SOL_ORACLE if direction == "LONG" else USDC_ORACLE
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -230,7 +226,6 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        # Vector de cuentas corregido sin pasar Token Mint directo en lugar de cuenta del sistema/pool
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -275,16 +270,10 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         direction = active_pos["type"]
         position_pda = Pubkey.from_string(active_pos["position_pda"])
 
-        if direction == "LONG":
-            target_custody = SOL_CUSTODY
-            collateral_custody = SOL_CUSTODY
-            target_oracle = SOL_ORACLE
-            collateral_oracle = SOL_ORACLE
-        else:
-            target_custody = SOL_CUSTODY
-            collateral_custody = USDC_CUSTODY
-            target_oracle = SOL_ORACLE
-            collateral_oracle = USDC_ORACLE
+        target_custody = SOL_CUSTODY
+        collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        target_oracle = SOL_ORACLE
+        collateral_oracle = SOL_ORACLE if direction == "LONG" else USDC_ORACLE
         
         slippage_price = exit_price * (0.988 if direction == "LONG" else 1.012)
         price_slippage_int = int(slippage_price * 1_000_000)
