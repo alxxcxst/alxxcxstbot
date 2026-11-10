@@ -14,6 +14,7 @@ from solders.pubkey import Pubkey
 from solders.instruction import Instruction, AccountMeta
 from solders.transaction import VersionedTransaction
 from solders.message import MessageV0
+from solders.hash import Hash
 
 # ==========================================
 # 1. PARÁMETROS Y VARIABLES DE ENTORNO
@@ -112,6 +113,7 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     return pda
 
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
+    # 1. Obtener blockhash reciente mediante HTTP RPC y castearlo a Hash de solders
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -119,8 +121,10 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
         "params": [{"commitment": "confirmed"}]
     }
     res_bh = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
-    latest_blockhash = res_bh["result"]["value"]["blockhash"]
+    latest_blockhash_str = res_bh["result"]["value"]["blockhash"]
+    latest_blockhash = Hash.from_string(latest_blockhash_str)
 
+    # 2. Compilar y firmar la transacción v0 usando el objeto Hash correcto
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -129,6 +133,7 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     )
     tx = VersionedTransaction(msg, [kp])
     
+    # 3. Codificar en base64 y transmitir por HTTP al nodo RPC
     raw_tx_bytes = bytes(tx)
     encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
     
@@ -197,7 +202,6 @@ def execute_order_onchain(direction: str, entry_price: float):
         funding_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        # Forzar discriminador estrictamente como bytes crudos
         disc = hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8]
         data = (
             disc
