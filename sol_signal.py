@@ -112,7 +112,6 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     return pda
 
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
-    # 1. Obtener blockhash reciente mediante HTTP RPC
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -122,7 +121,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     res_bh = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
     latest_blockhash = res_bh["result"]["value"]["blockhash"]
 
-    # 2. Compilar y firmar la transacción v0
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -131,7 +129,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     )
     tx = VersionedTransaction(msg, [kp])
     
-    # 3. Codificar en base64 y transmitir por HTTP al nodo RPC
     raw_tx_bytes = bytes(tx)
     encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
     
@@ -200,8 +197,8 @@ def execute_order_onchain(direction: str, entry_price: float):
         funding_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        # Discriminador convertido estrictamente a bytes de 8 bytes
-        disc = bytes(hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8])
+        # Forzar discriminador estrictamente como bytes crudos
+        disc = hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8]
         data = (
             disc
             + struct.pack("<QQBQ", size_usd_delta, collateral_delta, side_byte, price_slippage_int)
@@ -247,7 +244,6 @@ def execute_order_onchain(direction: str, entry_price: float):
         return None
 
 def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> bool:
-    """Envía la instrucción create_decrease_position_market_request para cerrar el trade."""
     try:
         kp = Keypair.from_base58_string(SOLANA_PRIVATE_KEY)
         owner = kp.pubkey()
@@ -275,7 +271,7 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         receiving_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        disc = bytes(hashlib.sha256(b"global:create_decrease_position_market_request").digest()[:8])
+        disc = hashlib.sha256(b"global:create_decrease_position_market_request").digest()[:8]
         data = (
             disc
             + struct.pack("<QQQ", 0, 0, price_slippage_int)
@@ -478,7 +474,6 @@ def telegram_listener():
                         )
                         send_telegram_alert(resp_text, target_chat_id=chat_id, clean_previous=True)
 
-                    # COMANDO TEST LONG MANUAL
                     elif text in ["/test", "/testlong", "test"]:
                         if active_trade:
                             send_telegram_alert("⚠️ Ya hay una posición activa. Ciérrala primero con /close antes de hacer un test.", target_chat_id=chat_id, clean_previous=True)
@@ -501,7 +496,6 @@ def telegram_listener():
                             else:
                                 send_telegram_alert("❌ Error obteniendo precio en vivo para el test.", target_chat_id=chat_id, clean_previous=True)
 
-                    # COMANDO TEST SHORT MANUAL
                     elif text == "/testshort":
                         if active_trade:
                             send_telegram_alert("⚠️ Ya hay una posición activa. Ciérrala primero con /close.", target_chat_id=chat_id, clean_previous=True)
@@ -524,7 +518,6 @@ def telegram_listener():
                             else:
                                 send_telegram_alert("❌ Error obteniendo precio en vivo.", target_chat_id=chat_id, clean_previous=True)
 
-                    # COMANDO CLOSE (Cierra la posición real en la blockchain)
                     elif text.startswith("/close") or text == "close":
                         if active_trade:
                             p = latest_market_data.get("price") or get_live_sol_price() or active_trade["entry"]
@@ -589,7 +582,6 @@ def market_engine():
                     prev_rsi = float(df.iloc[-3]["rsi_14"])
 
                     if not active_trade:
-                        # 🟢 CONDICIÓN LONG (Tendencia alcista + rebote de RSI en 42 + volumen)
                         if (close_p > ema_val) and (prev_rsi < 42 and rsi_val >= 42) and (vol_val > vol_avg):
                             entry = live_price if live_price else close_p
                             tp = round(entry * (1 + TP_PCT), 2)
@@ -606,7 +598,6 @@ def market_engine():
                                     "be_activated": False
                                 }
 
-                        # 🔴 CONDICIÓN SHORT (Tendencia bajista + rechazo de RSI en 58 + volumen)
                         elif (close_p < ema_val) and (prev_rsi > 58 and rsi_val <= 58) and (vol_val > vol_avg):
                             entry = live_price if live_price else close_p
                             tp = round(entry * (1 - TP_PCT), 2)
