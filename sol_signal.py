@@ -1,308 +1,394 @@
 import os
 import time
-import logging
+import threading
 import requests
 import pandas as pd
+from flask import Flask
 
-# Configuración de Logging
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
+# ==========================================
+# 1. PARÁMETROS Y VARIABLES DE ENTORNO
+# ==========================================
+TELEGRAM_BOT_TOKEN = (
+    os.environ.get("TELEGRAM_BOT_TOKEN")
+    or os.environ.get("TELEGRAM_TOKEN")
+    or os.environ.get("BOT_TOKEN")
 )
-logger = logging.getLogger("SolBotHF")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "8459722038"
 
-# --- CONFIGURACIÓN DE PARÁMETROS ---
-SYMBOL = "SOLUSDT"
-INTERVAL = "5m"
-LEVERAGE = 4
-MARGIN_USDC = 2.00
-NOTIONAL_SIZE = MARGIN_USDC * LEVERAGE  # $8.00 USD
+SYMBOL = "SOL-PERP"
+TIMEFRAME = "5m"
 
-# Gestión de Riesgo
-TP_PCT = 0.03       # Take Profit: +3.0%
-SL_PCT = 0.015      # Stop Loss: -1.5%
-BE_TRIGGER = 0.012  # Activación de Break-Even: +1.2%
+# Gestión de capital ($2.00 USDC x 4 = $8.00 USD nocional)
+MARGIN_USDC = float(os.environ.get("MARGIN_USDC", "2.0"))
+LEVERAGE = int(os.environ.get("LEVERAGE", "4"))
+
+# Gestión de riesgo R:R 1:2 estricto
+SL_PCT = 0.015          # 1.5% Stop Loss
+TP_PCT = 0.030          # 3.0% Take Profit
+BE_TRIGGER_PCT = 0.012  # Activar Break-Even al +1.2%
 
 # Filtros Anti-Ruido
-RSI_PERIOD = 14
-RSI_SHORT_THRESHOLD = 60
-RSI_LONG_THRESHOLD = 40
-VOL_FACTOR = 0.8
+RSI_SHORT_THRESHOLD = 60  # Cruce a la baja desde sobrecompra
+RSI_LONG_THRESHOLD = 40   # Cruce al alza desde sobreventa
+VOL_FACTOR = 0.8          # Volumen mínimo: vol > vol_avg * 0.8
 
-# Credenciales de Telegram
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "TU_TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "TU_CHAT_ID")
+# Variables de estado
+latest_market_data = {"price": None, "ema": None, "rsi": None}
+active_trade = None
+candles_scanned_count = 0
+last_bot_message_id = None
+threads_started = False
 
-# Estado interno de la posición y control anti-spam de mensajes
-current_position = {
-    "active": False,
-    "side": None,
-    "entry_price": 0.0,
-    "tp_price": 0.0,
-    "sl_price": 0.0,
-    "be_activated": False
-}
+app = Flask(__name__)
 
-last_sent_message_id = None  # Para eliminar el mensaje anterior y evitar spam
-
-
-def send_telegram_message(text: str, replace_previous: bool = False):
-    """Envía un mensaje a Telegram. Si replace_previous=True, borra el mensaje anterior para evitar spam."""
-    global last_sent_message_id
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "TU_TELEGRAM_BOT_TOKEN":
+# ==========================================
+# 2. MOTOR DE COMUNICACIÓN TELEGRAM (ANTI-SPAM)
+# ==========================================
+def delete_telegram_message(chat_id, message_id):
+    if not TELEGRAM_BOT_TOKEN or not message_id:
         return
-        
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    
-    # Borrar mensaje anterior si se solicita
-    if replace_previous and last_sent_message_id:
-        try:
-            requests.post(f"{base_url}/deleteMessage", json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "message_id": last_sent_message_id
-            }, timeout=3)
-        except Exception:
-            pass
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=3)
+    except Exception:
+        pass
 
-    # Enviar nuevo mensaje
+def send_telegram_alert(message, target_chat_id=None, clean_previous=False):
+    global last_bot_message_id
+    token = TELEGRAM_BOT_TOKEN
+    if not token:
+        return
+
+    dest_id = target_chat_id if target_chat_id else TELEGRAM_CHAT_ID
+
+    if clean_previous and last_bot_message_id:
+        delete_telegram_message(dest_id, last_bot_message_id)
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
+        "chat_id": dest_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
+
     try:
-        response = requests.post(f"{base_url}/sendMessage", json=payload, timeout=5)
-        if response.status_code == 200:
-            res_json = response.json()
-            last_sent_message_id = res_json.get("result", {}).get("message_id")
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code == 200:
+            res_json = r.json()
+            if clean_previous:
+                last_bot_message_id = res_json.get("result", {}).get("message_id")
     except Exception as e:
-        logger.error(f"Excepción en Telegram API: {e}")
+        print(f"[Telegram] Error: {e}")
 
-
-def fetch_binance_klines(symbol: str, interval: str, limit: int = 250) -> pd.DataFrame:
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+# ==========================================
+# 3. FEED DE MERCADO (COINBASE 5M) Y TÉCNICO
+# ==========================================
+def get_live_sol_price():
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        df = pd.DataFrame(data, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+        url = "https://api.coinbase.com/v2/prices/SOL-USD/spot"
+        res = requests.get(url, headers=headers, timeout=5).json()
+        return float(res["data"]["amount"])
+    except Exception:
+        return None
+
+def fetch_candles_5m():
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        # Granularity 300 segundos = 5 minutos en Coinbase Exchange API
+        url = "https://api.exchange.coinbase.com/products/SOL-USD/candles?granularity=300"
+        res = requests.get(url, headers=headers, timeout=10).json()
+        if not isinstance(res, list) or len(res) < 210:
+            return None
+        df = pd.DataFrame(res, columns=["time", "low", "high", "open", "close", "volume"])
+        df = df.sort_values(by="time").reset_index(drop=True)
         return df
     except Exception as e:
-        logger.error(f"Error al conectar con Binance API: {e}")
-        return pd.DataFrame()
+        print(f"[Mercado] Error velas: {e}")
+        return None
 
+def calculate_technical_indicators(df):
+    close = df["close"]
+    df["ema_200"] = close.ewm(span=200, adjust=False).mean()
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    df['vol_avg'] = df['volume'].rolling(window=20).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    df["rsi_14"] = 100 - (100 / (1 + rs))
+
+    df["vol_ma20"] = df["volume"].rolling(window=20).mean()
     return df
 
-
-def check_telegram_commands():
-    """Revisa comandos entrantes (/status, /price, /restart) para interacción en tiempo real."""
-    global current_position, last_sent_message_id
-    if not TELEGRAM_TOKEN:
+# ==========================================
+# 4. GESTIÓN AUTÓNOMA DE SEÑALES Y BREAK-EVEN
+# ==========================================
+def manage_open_position(current_price):
+    global active_trade
+    if not active_trade:
         return
-        
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset=-1&timeout=1"
-    try:
-        response = requests.get(url, timeout=3)
-        if response.status_code != 200:
-            return
-        data = response.json()
-        results = data.get("result", [])
-        if not results:
-            return
-            
-        update = results[-1]
-        message = update.get("message", {})
-        text = message.get("text", "").strip().lower()
-        msg_id = message.get("message_id")
-        
-        # Evitar procesar el mismo comando dos veces verificando si es reciente
-        if not text.startswith("/"):
-            return
 
-        # Borrar el comando escrito por el usuario para mantener limpio el chat
+    direction = active_trade["type"]
+    entry = active_trade["entry"]
+    tp = active_trade["tp"]
+    sl = active_trade["sl"]
+    be_active = active_trade["be_activated"]
+
+    if direction == "LONG":
+        if not be_active and current_price >= entry * (1 + BE_TRIGGER_PCT):
+            active_trade["be_activated"] = True
+            active_trade["sl"] = round(entry, 2)  # SL movido a precio de entrada exacto
+            send_telegram_alert(
+                f"🛡️ <b>BREAK-EVEN BLINDADO · LONG</b>\n"
+                f"Precio: <code>${current_price:.2f}</code> (+1.2%). Stop Loss movido a entrada: <code>${active_trade['sl']:.2f}</code>"
+            )
+        elif current_price >= tp:
+            send_telegram_alert(
+                f"🎯 <b>TAKE PROFIT ALCANZADO (+3.0%)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Par: <b>{SYMBOL}</b> (LONG)\n"
+                f"Entrada: <code>${entry:.2f}</code>\n"
+                f"Salida (TP): <code>${current_price:.2f}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            active_trade = None
+        elif current_price <= sl:
+            send_telegram_alert(
+                f"🛑 <b>STOP LOSS ALCANZADO</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Par: <b>{SYMBOL}</b> (LONG)\n"
+                f"Entrada: <code>${entry:.2f}</code>\n"
+                f"Salida (SL): <code>${current_price:.2f}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            active_trade = None
+
+    elif direction == "SHORT":
+        if not be_active and current_price <= entry * (1 - BE_TRIGGER_PCT):
+            active_trade["be_activated"] = True
+            active_trade["sl"] = round(entry, 2)  # SL movido a precio de entrada exacto
+            send_telegram_alert(
+                f"🛡️ <b>BREAK-EVEN BLINDADO · SHORT</b>\n"
+                f"Precio: <code>${current_price:.2f}</code> (+1.2%). Stop Loss movido a entrada: <code>${active_trade['sl']:.2f}</code>"
+            )
+        elif current_price <= tp:
+            send_telegram_alert(
+                f"🎯 <b>TAKE PROFIT ALCANZADO (+3.0%)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Par: <b>{SYMBOL}</b> (SHORT)\n"
+                f"Entrada: <code>${entry:.2f}</code>\n"
+                f"Salida (TP): <code>${current_price:.2f}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            active_trade = None
+        elif current_price >= sl:
+            send_telegram_alert(
+                f"🛑 <b>STOP LOSS ALCANZADO</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Par: <b>{SYMBOL}</b> (SHORT)\n"
+                f"Entrada: <code>${entry:.2f}</code>\n"
+                f"Salida (SL): <code>${current_price:.2f}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            active_trade = None
+
+# ==========================================
+# 5. LISTENER TELEGRAM (COMANDOS SIMPLIFICADOS)
+# ==========================================
+def telegram_listener():
+    global active_trade
+    offset = None
+    print("[Telegram] Listener activo.")
+
+    while True:
+        token = TELEGRAM_BOT_TOKEN
+        if not token:
+            time.sleep(5)
+            continue
+
         try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "message_id": msg_id
-            }, timeout=2)
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
+            params = {"timeout": 10}
+            if offset is not None:
+                params["offset"] = offset
+
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg = update.get("message", {})
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    msg_id = msg.get("message_id")
+                    text = msg.get("text", "").strip().lower()
+
+                    if msg_id and (text.startswith("/") or text in ["price", "status", "restart"]):
+                        delete_telegram_message(chat_id, msg_id)
+
+                    if text.startswith("/price") or text == "price":
+                        p = latest_market_data.get("price") or get_live_sol_price()
+                        ema = latest_market_data.get("ema")
+                        rsi = latest_market_data.get("rsi")
+                        if p:
+                            resp_text = (
+                                "📊 <b>TELEMETRÍA SOL-PERP (5M)</b>\n"
+                                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"💵 <b>Precio Spot:</b> <code>${p:.2f}</code>\n"
+                                f"📈 <b>EMA 200:</b> <code>${ema:.2f}</code>\n"
+                                f"📉 <b>RSI (14):</b> <code>{rsi:.1f}</code>\n"
+                                f"🛡️ <b>Filtro Volumen:</b> <code>Activo</code>\n"
+                                "━━━━━━━━━━━━━━━━━━━━━━"
+                            )
+                        else:
+                            resp_text = "⏳ Sincronizando precio..."
+                        send_telegram_alert(resp_text, target_chat_id=chat_id, clean_previous=True)
+
+                    elif text.startswith("/status") or text == "status":
+                        pos = f"SÍ ({active_trade['type']} @ ${active_trade['entry']:.2f})" if active_trade else "NO (Buscando entrada)"
+                        resp_text = (
+                            "🟢 <b>ESTADO DEL SISTEMA - SOL/USDT</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "• <b>Nodo Render:</b> En línea ⚡\n"
+                            f"• <b>Posición Activa:</b> <code>{pos}</code>\n"
+                            f"• <b>Velas 5M escaneadas:</b> {candles_scanned_count}\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        send_telegram_alert(resp_text, target_chat_id=chat_id, clean_previous=True)
+
+                    elif text.startswith("/restart") or text == "restart":
+                        active_trade = None
+                        resp_text = "🔄 <b>SISTEMA REINICIADO</b>\nEstado de posiciones reseteado a cero. El bot continúa operando en segundo plano."
+                        send_telegram_alert(resp_text, target_chat_id=chat_id, clean_previous=True)
+
         except Exception:
-            pass
+            time.sleep(5)
+        time.sleep(1)
 
-        df = fetch_binance_klines(SYMBOL, INTERVAL, limit=50)
-        if df.empty:
-            return
-        df = calculate_indicators(df)
-        current_price = df.iloc[-1]['close']
-        current_rsi = df.iloc[-1]['rsi']
-        current_ema = df.iloc[-1]['ema_200']
+# ==========================================
+# 6. MOTOR PRINCIPAL DE MERCADO (5M)
+# ==========================================
+def market_engine():
+    global candles_scanned_count, latest_market_data, active_trade
+    last_evaluated_time = None
+    time.sleep(3)
 
-        if text == "/status":
-            status_text = "🟢 **ESTADO DEL SISTEMA - SOL/USDT**\n"
-            status_text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-            status_text += f"• **Nodo Render:** En línea ⚡\n"
-            status_text += f"• **Posición Activa:** `{'SÍ (' + current_position['side'] + ')' if current_position['active'] else 'NO (Buscando entrada)'}`\n"
-            if current_position['active']:
-                status_text += f"• **Entrada:** `${current_position['entry_price']:.2f}`\n"
-                status_text += f"• **Take Profit:** `${current_position['tp_price']:.2f}`\n"
-                status_text += f"• **Stop Loss:** `${current_position['sl_price']:.2f}`\n"
-                status_text += f"• **Break-Even Blindado:** `{'Activado ✅' if current_position['be_activated'] else 'Pendiente ⏳'}`\n"
-            status_text += f"• **Precio Actual:** `${current_price:.2f}`\n"
-            status_text += "━━━━━━━━━━━━━━━━━━━━━━"
-            send_telegram_message(status_text, replace_previous=True)
+    send_telegram_alert(
+        f"🤖 <b>Bot de Alta Frecuencia (SOL-PERP 5M)</b> en línea y operando en Render.",
+        clean_previous=True
+    )
 
-        elif text == "/price":
-            price_text = "📊 **TELEMETRÍA DE MERCADO (5M)**\n"
-            price_text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-            price_text += f"🪙 **Par:** `{SYMBOL}`\n"
-            price_text += f"💵 **Precio Spot:** `${current_price:.2f}`\n"
-            price_text += f"📈 **EMA 200:** `${current_ema:.2f}`\n"
-            price_text += f"📉 **RSI (14):** `{current_rsi:.1f}`\n"
-            price_text += f"🛡️ **Filtro Volumen:** `Activo`\n"
-            price_text += "━━━━━━━━━━━━━━━━━━━━━━"
-            send_telegram_message(price_text, replace_previous=True)
-
-        elif text == "/restart":
-            current_position["active"] = False
-            restart_text = "🔄 **SISTEMA REINICIADO**\nEstado de posiciones reseteado a cero. El bot continúa operando en segundo plano."
-            send_telegram_message(restart_text, replace_previous=True)
-
-    except Exception as e:
-        logger.error(f"Error procesando comandos de Telegram: {e}")
-
-
-def evaluate_market():
-    global current_position
-
-    df = fetch_binance_klines(SYMBOL, INTERVAL, limit=250)
-    if df.empty or len(df) < 205:
-        return
-
-    df = calculate_indicators(df)
-    prev = df.iloc[-2]
-    prev_prev = df.iloc[-3]
-    
-    price = prev['close']
-    ema_200 = prev['ema_200']
-    rsi_current = prev['rsi']
-    rsi_previous = prev_prev['rsi']
-    vol_current = prev['volume']
-    vol_avg = prev['vol_avg']
-
-    # --- GESTIÓN DE POSICIÓN ACTIVA ---
-    if current_position["active"]:
-        side = current_position["side"]
-        entry = current_position["entry_price"]
-        
-        if side == "LONG":
-            if not current_position["be_activated"] and (price - entry) / entry >= BE_TRIGGER:
-                current_position["sl_price"] = entry
-                current_position["be_activated"] = True
-                msg = f"🛡️ **BREAK-EVEN BLINDADO (LONG)**\nPrecio alcanzó objetivo rápido. SL movido a entrada: `${entry:.2f}`"
-                send_telegram_message(msg, replace_previous=True)
-            
-            if price >= current_position["tp_price"] or price <= current_position["sl_price"]:
-                result_type = "TAKE PROFIT 🎯 (+3.0%)" if price >= current_position["tp_price"] else "STOP LOSS 🛑 (-1.5%)"
-                msg = f"✅ **CIERRE DE POSICIÓN LONG**\nResultado: {result_type}\nPrecio: `${price:.2f}`"
-                send_telegram_message(msg, replace_previous=True)
-                current_position["active"] = False
-                
-        elif side == "SHORT":
-            if not current_position["be_activated"] and (entry - price) / entry >= BE_TRIGGER:
-                current_position["sl_price"] = entry
-                current_position["be_activated"] = True
-                msg = f"🛡️ **BREAK-EVEN BLINDADO (SHORT)**\nPrecio alcanzó objetivo rápido. SL movido a entrada: `${entry:.2f}`"
-                send_telegram_message(msg, replace_previous=True)
-                
-            if price <= current_position["tp_price"] or price >= current_position["sl_price"]:
-                result_type = "TAKE PROFIT 🎯 (+3.0%)" if price <= current_position["tp_price"] else "STOP LOSS 🛑 (-1.5%)"
-                msg = f"✅ **CIERRE DE POSICIÓN SHORT**\nResultado: {result_type}\nPrecio: `${price:.2f}`"
-                send_telegram_message(msg, replace_previous=True)
-                current_position["active"] = False
-        return
-
-    # --- FILTROS ANTI-RUIDO Y APERTURA ---
-    if vol_current < (vol_avg * VOL_FACTOR):
-        return
-
-    # Señal SHORT Ejecutiva
-    if price < ema_200 and rsi_previous >= RSI_SHORT_THRESHOLD and rsi_current < RSI_SHORT_THRESHOLD:
-        entry = price
-        tp = entry * (1 - TP_PCT)
-        sl = entry * (1 + SL_PCT)
-        
-        current_position = {
-            "active": True, "side": "SHORT", "entry_price": entry,
-            "tp_price": tp, "sl_price": sl, "be_activated": False
-        }
-        
-        msg = (
-            f"🚨 **ALTA FRECUENCIA • SEÑAL SHORT** 🚨\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 **Activo:** `{SYMBOL}` (5M)\n"
-            f"📉 **Entrada:** `${entry:.2f}`\n"
-            f"💰 **Margen:** `${MARGIN_USDC} USDC` ({LEVERAGE}x | Nocional: `${NOTIONAL_SIZE}`)\n"
-            f"🎯 **Take Profit (+3.0%):** `${tp:.2f}`\n"
-            f"🛑 **Stop Loss (-1.5%):** `${sl:.2f}`\n"
-            f"📊 **Filtros:** EMA200: `${ema_200:.2f}` | RSI: `{rsi_current:.1f}`\n"
-            f"🛡️ **Break-Even:** Automático al +{BE_TRIGGER*100}%\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        send_telegram_message(msg, replace_previous=False) # Las señales de entrada no borran estados para historial limpio
-
-    # Señal LONG Ejecutiva
-    elif price > ema_200 and rsi_previous <= RSI_LONG_THRESHOLD and rsi_current > RSI_LONG_THRESHOLD:
-        entry = price
-        tp = entry * (1 + TP_PCT)
-        sl = entry * (1 - SL_PCT)
-        
-        current_position = {
-            "active": True, "side": "LONG", "entry_price": entry,
-            "tp_price": tp, "sl_price": sl, "be_activated": False
-        }
-        
-        msg = (
-            f"🚨 **ALTA FRECUENCIA • SEÑAL LONG** 🚨\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 **Activo:** `{SYMBOL}` (5M)\n"
-            f"📈 **Entrada:** `${entry:.2f}`\n"
-            f"💰 **Margen:** `${MARGIN_USDC} USDC` ({LEVERAGE}x | Nocional: `${NOTIONAL_SIZE}`)\n"
-            f"🎯 **Take Profit (+3.0%):** `${tp:.2f}`\n"
-            f"🛑 **Stop Loss (-1.5%):** `${sl:.2f}`\n"
-            f"📊 **Filtros:** EMA200: `${ema_200:.2f}` | RSI: `{rsi_current:.1f}`\n"
-            f"🛡️ **Break-Even:** Automático al +{BE_TRIGGER*100}%\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        send_telegram_message(msg, replace_previous=False)
-
-
-def main():
-    logger.info("Iniciando Bot Autónomo de Alta Frecuencia para SOL/USDT...")
-    send_telegram_message("🤖 **Bot de Alta Frecuencia (SOL/USDT 5M)** en línea y operando en Render.", replace_previous=True)
-    
     while True:
         try:
-            check_telegram_commands()
-            evaluate_market()
-        except Exception as e:
-            logger.error(f"Error crítico en el ciclo: {e}")
-        
-        time.sleep(10)  # Ciclo rápido para capturar comandos instantáneamente y evaluar velas
+            live_price = get_live_sol_price()
+            if live_price:
+                latest_market_data["price"] = live_price
+                manage_open_position(live_price)
 
+            df = fetch_candles_5m()
+            if df is not None and len(df) >= 200:
+                df = calculate_technical_indicators(df)
+
+                closed_candle = df.iloc[-2]
+                candle_time = closed_candle["time"]
+
+                latest_market_data["ema"] = float(closed_candle["ema_200"])
+                latest_market_data["rsi"] = float(closed_candle["rsi_14"])
+
+                if candle_time != last_evaluated_time:
+                    last_evaluated_time = candle_time
+                    candles_scanned_count += 1
+
+                    close_p = float(closed_candle["close"])
+                    ema_val = float(closed_candle["ema_200"])
+                    rsi_val = float(closed_candle["rsi_14"])
+                    vol_val = float(closed_candle["volume"])
+                    vol_avg = float(closed_candle["vol_ma20"])
+                    prev_rsi = float(df.iloc[-3]["rsi_14"])
+
+                    if not active_trade:
+                        # Capa 3: Filtro de volumen flexible
+                        if vol_val >= (vol_avg * VOL_FACTOR):
+                            # Señal LONG (Precio > EMA200 y RSI cruza al alza desde sobreventa < 40)
+                            if (close_p > ema_val) and (prev_rsi <= RSI_LONG_THRESHOLD and rsi_val > RSI_LONG_THRESHOLD):
+                                entry = live_price if live_price else close_p
+                                tp = round(entry * (1 + TP_PCT), 2)
+                                sl = round(entry * (1 - SL_PCT), 2)
+                                notional = MARGIN_USDC * LEVERAGE
+
+                                active_trade = {
+                                    "type": "LONG",
+                                    "entry": entry,
+                                    "tp": tp,
+                                    "sl": sl,
+                                    "be_activated": False
+                                }
+
+                                card = (
+                                    f"🚨 <b>ALTA FRECUENCIA • SEÑAL LONG (5M)</b> 🚨\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🪙 <b>Activo:</b> <code>{SYMBOL}</code>\n"
+                                    f"📈 <b>Entrada:</b> <code>${entry:.2f}</code>\n"
+                                    f"💰 <b>Margen:</b> <code>${MARGIN_USDC} USDC ({LEVERAGE}x | Nocional: ${notional:.2f})</code>\n"
+                                    f"🎯 <b>Take Profit (+3.0%):</b> <code>${tp:.2f}</code>\n"
+                                    f"🛑 <b>Stop Loss (-1.5%):</b> <code>${sl:.2f}</code>\n"
+                                    f"🛡️ <b>Break-Even:</b> Automático al +{BE_TRIGGER_PCT*100}%\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━"
+                                )
+                                send_telegram_alert(card)
+
+                            # Señal SHORT (Precio < EMA200 y RSI cruza a la baja desde sobrecompra > 60)
+                            elif (close_p < ema_val) and (prev_rsi >= RSI_SHORT_THRESHOLD and rsi_val < RSI_SHORT_THRESHOLD):
+                                entry = live_price if live_price else close_p
+                                tp = round(entry * (1 - TP_PCT), 2)
+                                sl = round(entry * (1 + SL_PCT), 2)
+                                notional = MARGIN_USDC * LEVERAGE
+
+                                active_trade = {
+                                    "type": "SHORT",
+                                    "entry": entry,
+                                    "tp": tp,
+                                    "sl": sl,
+                                    "be_activated": False
+                                }
+
+                                card = (
+                                    f"🚨 <b>ALTA FRECUENCIA • SEÑAL SHORT (5M)</b> 🚨\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"🪙 <b>Activo:</b> <code>{SYMBOL}</code>\n"
+                                    f"📉 <b>Entrada:</b> <code>${entry:.2f}</code>\n"
+                                    f"💰 <b>Margen:</b> <code>${MARGIN_USDC} USDC ({LEVERAGE}x | Nocional: ${notional:.2f})</code>\n"
+                                    f"🎯 <b>Take Profit (+3.0%):</b> <code>${tp:.2f}</code>\n"
+                                    f"🛑 <b>Stop Loss (-1.5%):</b> <code>${sl:.2f}</code>\n"
+                                    f"🛡️ <b>Break-Even:</b> Automático al +{BE_TRIGGER_PCT*100}%\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━"
+                                )
+                                send_telegram_alert(card)
+        except Exception as e:
+            print(f"[Engine] Error en ciclo: {e}")
+
+        time.sleep(20)
+
+# ==========================================
+# 7. ARRANQUE SEGURO EN RENDER (FLASK)
+# ==========================================
+def start_background_workers():
+    global threads_started
+    if not threads_started:
+        threads_started = True
+        t_market = threading.Thread(target=market_engine, daemon=True)
+        t_market.start()
+        t_telegram = threading.Thread(target=telegram_listener, daemon=True)
+        t_telegram.start()
+
+start_background_workers()
+
+@app.route("/")
+def home():
+    return "SOL/USDT Signal Bot Activo 24/7", 200
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
