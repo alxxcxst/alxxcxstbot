@@ -3,4 +3,3 @@ gunicorn>=21.2.0
 requests>=2.31.0
 pandas>=2.1.0
 solders>=0.20.0
-solana>=0.32.0
