@@ -113,7 +113,6 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     return pda
 
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
-    # 1. Obtener blockhash reciente mediante HTTP RPC y castearlo a Hash de solders
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -124,7 +123,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     latest_blockhash_str = res_bh["result"]["value"]["blockhash"]
     latest_blockhash = Hash.from_string(latest_blockhash_str)
 
-    # 2. Compilar y firmar la transacción v0 usando el objeto Hash correcto
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -133,7 +131,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     )
     tx = VersionedTransaction(msg, [kp])
     
-    # 3. Codificar en base64 y transmitir por HTTP al nodo RPC
     raw_tx_bytes = bytes(tx)
     encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
     
@@ -172,8 +169,9 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Corrección de custodia: Long usa SOL_CUSTODY, Short usa USDC_CUSTODY
+        # Para LONG el colateral y activo subyacente usan SOL_CUSTODY; para SHORT usan USDC_CUSTODY
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -183,7 +181,7 @@ def execute_order_onchain(direction: str, entry_price: float):
                 b"position",
                 bytes(owner),
                 bytes(JLP_POOL_PUBKEY),
-                bytes(SOL_CUSTODY),
+                bytes(target_custody),
                 bytes(collateral_custody),
                 bytes([side_byte]),
             ],
@@ -219,7 +217,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(position_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
-            AccountMeta(SOL_CUSTODY, is_signer=False, is_writable=False),
+            AccountMeta(target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -256,6 +254,8 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         position_pda = Pubkey.from_string(active_pos["position_pda"])
 
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        
         slippage_price = exit_price * (0.988 if direction == "LONG" else 1.012)
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
@@ -292,7 +292,7 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
             AccountMeta(position_pda, is_signer=False, is_writable=False),
             AccountMeta(position_req_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
-            AccountMeta(SOL_CUSTODY, is_signer=False, is_writable=False),
+            AccountMeta(target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
