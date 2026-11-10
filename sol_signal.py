@@ -169,9 +169,10 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Para LONG el colateral y activo subyacente usan SOL_CUSTODY; para SHORT usan USDC_CUSTODY
+        # Configuración exacta de custodias para SOL-PERP
+        # Para Short: El mercado subyacente es SOL_CUSTODY, y el colateral que aporta el usuario es USDC_CUSTODY
+        target_custody = SOL_CUSTODY
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
-        target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -209,6 +210,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
+        # Orden exacto de cuentas para Jupiter Perps create_increase_position_market_request
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
