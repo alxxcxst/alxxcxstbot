@@ -230,7 +230,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        # Cuentas estructuradas con oráculos integrados para satisfacer AccountNotInitialized en Jup Perps
+        # Vector de cuentas corregido sin pasar Token Mint directo en lugar de cuenta del sistema/pool
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -243,8 +243,6 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(target_oracle, is_signer=False, is_writable=False),
             AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
-            AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
-            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(ASSOC_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -328,8 +326,6 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(target_oracle, is_signer=False, is_writable=False),
             AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
-            AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
-            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(ASSOC_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
