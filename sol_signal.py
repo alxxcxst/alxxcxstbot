@@ -178,8 +178,15 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        target_custody = SOL_CUSTODY
-        collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        # CORRECCIÓN DE CUSTODIAS PARA SHORT:
+        # Para LONG: target = SOL_CUSTODY, collateral = SOL_CUSTODY
+        # Para SHORT: target = USDC_CUSTODY, collateral = USDC_CUSTODY
+        if direction == "LONG":
+            target_custody = SOL_CUSTODY
+            collateral_custody = SOL_CUSTODY
+        else:
+            target_custody = USDC_CUSTODY
+            collateral_custody = USDC_CUSTODY
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -217,8 +224,6 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        effective_target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
-
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -227,7 +232,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(position_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
-            AccountMeta(effective_target_custody, is_signer=False, is_writable=False),
+            AccountMeta(target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -250,6 +255,11 @@ def execute_order_onchain(direction: str, entry_price: float):
             f"Tx Hash: <a href='https://solscan.io/tx/{tx_sig}'>Ver en Solscan</a>"
         )
         return str(position_pda)
+
+    except Exception as e:
+        print(f"[Jupiter Perps Error] {e}")
+        send_telegram_alert(f"⚠️ <b>Error al abrir en Jupiter Perps:</b>\n<code>{e}</code>")
+        return None
 
     except Exception as e:
         print(f"[Jupiter Perps Error] {e}")
