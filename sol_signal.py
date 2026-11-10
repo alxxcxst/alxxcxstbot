@@ -53,6 +53,10 @@ USDC_CUSTODY = Pubkey.from_string("G18jKKXQwBbrHeiK3C9MRXhkHsugf7XgCSisykV46EZa"
 SOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
 USDC_MINT = Pubkey.from_string("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
 
+# Cuentas de Oráculo Pyth oficiales asociadas en Jupiter Perps para SOL y USDC
+SOL_ORACLE = Pubkey.from_string("H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG")
+USDC_ORACLE = Pubkey.from_string("Gnt27XTJ473HcbMV5TPnbcQ5b4n6p7e4hA8y66c2tGgN")
+
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOC_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
@@ -178,15 +182,17 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # CORRECCIÓN DE CUSTODIAS PARA SHORT:
-        # Para LONG: target = SOL_CUSTODY, collateral = SOL_CUSTODY
-        # Para SHORT: target = USDC_CUSTODY, collateral = USDC_CUSTODY
+        # Configuración de custodias y oráculos según dirección
         if direction == "LONG":
             target_custody = SOL_CUSTODY
             collateral_custody = SOL_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = SOL_ORACLE
         else:
-            target_custody = USDC_CUSTODY
+            target_custody = SOL_CUSTODY
             collateral_custody = USDC_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = USDC_ORACLE
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -224,6 +230,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
+        # Cuentas estructuradas con oráculos integrados para satisfacer AccountNotInitialized en Jup Perps
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -234,6 +241,8 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
             AccountMeta(target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
+            AccountMeta(target_oracle, is_signer=False, is_writable=False),
+            AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -261,11 +270,6 @@ def execute_order_onchain(direction: str, entry_price: float):
         send_telegram_alert(f"⚠️ <b>Error al abrir en Jupiter Perps:</b>\n<code>{e}</code>")
         return None
 
-    except Exception as e:
-        print(f"[Jupiter Perps Error] {e}")
-        send_telegram_alert(f"⚠️ <b>Error al abrir en Jupiter Perps:</b>\n<code>{e}</code>")
-        return None
-
 def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> bool:
     try:
         kp = Keypair.from_base58_string(SOLANA_PRIVATE_KEY)
@@ -273,8 +277,16 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         direction = active_pos["type"]
         position_pda = Pubkey.from_string(active_pos["position_pda"])
 
-        collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
-        target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+        if direction == "LONG":
+            target_custody = SOL_CUSTODY
+            collateral_custody = SOL_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = SOL_ORACLE
+        else:
+            target_custody = SOL_CUSTODY
+            collateral_custody = USDC_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = USDC_ORACLE
         
         slippage_price = exit_price * (0.988 if direction == "LONG" else 1.012)
         price_slippage_int = int(slippage_price * 1_000_000)
@@ -314,6 +326,8 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
             AccountMeta(target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
+            AccountMeta(target_oracle, is_signer=False, is_writable=False),
+            AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
