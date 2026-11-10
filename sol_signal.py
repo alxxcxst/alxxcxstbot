@@ -60,7 +60,6 @@ USDC_ORACLE = Pubkey.from_string("Gnt27XTJ473HcbMV5TPnbcQ5b4n6p7e4hA8y66c2tGgN")
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 ASSOC_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
-RENT_PROGRAM_ID = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
 
 # Variables de estado
 latest_market_data = {"price": None, "ema": None, "rsi": None}
@@ -183,13 +182,17 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Mapeo exacto de custodias y oráculos en Jupiter Perps para SOL-PERP
-        # En Jupiter Perps, tanto para LONG como SHORT de SOL, el asset custody es SOL_CUSTODY
-        # y el colateral aportado por el usuario es USDC_CUSTODY (margen en USDC).
-        target_custody = SOL_CUSTODY
-        collateral_custody = USDC_CUSTODY
-        target_oracle = SOL_ORACLE
-        collateral_oracle = USDC_ORACLE
+        # Mapeo exacto de custodias y oráculos según el sentido de la posición
+        if direction == "LONG":
+            target_custody = SOL_CUSTODY
+            collateral_custody = SOL_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = SOL_ORACLE
+        else:
+            target_custody = SOL_CUSTODY
+            collateral_custody = USDC_CUSTODY
+            target_oracle = SOL_ORACLE
+            collateral_oracle = USDC_ORACLE
 
         perpetuals_pda, _ = Pubkey.find_program_address([b"perpetuals"], JUP_PERPS_PROGRAM_ID)
         event_auth_pda, _ = Pubkey.find_program_address([b"__event_authority"], JUP_PERPS_PROGRAM_ID)
@@ -227,7 +230,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        # Arreglo de cuentas validado con las cuentas de control y token correctas
+        # Vector de cuentas corregido con las posiciones exactas requeridas por el IDL de Jupiter Perps
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -240,8 +243,6 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(target_oracle, is_signer=False, is_writable=False),
             AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
-            AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
-            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(ASSOC_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
@@ -275,9 +276,9 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
         position_pda = Pubkey.from_string(active_pos["position_pda"])
 
         target_custody = SOL_CUSTODY
-        collateral_custody = USDC_CUSTODY
+        collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
         target_oracle = SOL_ORACLE
-        collateral_oracle = USDC_ORACLE
+        collateral_oracle = SOL_ORACLE if direction == "LONG" else USDC_ORACLE
         
         slippage_price = exit_price * (0.988 if direction == "LONG" else 1.012)
         price_slippage_int = int(slippage_price * 1_000_000)
@@ -319,8 +320,6 @@ def close_position_onchain(active_pos: dict, exit_price: float, reason: str) -> 
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(target_oracle, is_signer=False, is_writable=False),
             AccountMeta(collateral_oracle, is_signer=False, is_writable=False),
-            AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
-            AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(ASSOC_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
             AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
