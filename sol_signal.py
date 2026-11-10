@@ -169,8 +169,7 @@ def execute_order_onchain(direction: str, entry_price: float):
         price_slippage_int = int(slippage_price * 1_000_000)
         counter = int(time.time() * 1000) % 1_000_000_000
 
-        # Configuración exacta de custodias para SOL-PERP
-        # Para Short: El mercado subyacente es SOL_CUSTODY, y el colateral que aporta el usuario es USDC_CUSTODY
+        # Para LONG usamos SOL como colateral; para SHORT usamos USDC para evitar el error de cuenta no inicializada
         target_custody = SOL_CUSTODY
         collateral_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
 
@@ -210,7 +209,9 @@ def execute_order_onchain(direction: str, entry_price: float):
             + struct.pack("<Q", counter)
         )
 
-        # Orden exacto de cuentas para Jupiter Perps create_increase_position_market_request
+        # Si es SHORT, ambas custodias de las cuentas de programa deben apuntar a USDC_CUSTODY para satisfacer la inicialización del pool
+        effective_target_custody = SOL_CUSTODY if direction == "LONG" else USDC_CUSTODY
+
         accounts = [
             AccountMeta(owner, is_signer=True, is_writable=True),
             AccountMeta(funding_account, is_signer=False, is_writable=True),
@@ -219,7 +220,7 @@ def execute_order_onchain(direction: str, entry_price: float):
             AccountMeta(position_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_pda, is_signer=False, is_writable=True),
             AccountMeta(position_req_ata, is_signer=False, is_writable=True),
-            AccountMeta(target_custody, is_signer=False, is_writable=False),
+            AccountMeta(effective_target_custody, is_signer=False, is_writable=False),
             AccountMeta(collateral_custody, is_signer=False, is_writable=False),
             AccountMeta(USDC_MINT, is_signer=False, is_writable=False),
             AccountMeta(JUP_PERPS_PROGRAM_ID, is_signer=False, is_writable=False),
