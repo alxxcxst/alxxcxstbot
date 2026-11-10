@@ -201,9 +201,10 @@ def execute_order_onchain(direction: str, entry_price: float):
         funding_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        disc = hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8]
+        # Discriminador Anchor corregido a bytes puros
+        disc = list(hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8])
         data = (
-            disc
+            bytes(disc)
             + struct.pack("<QQBQ", size_usd_delta, collateral_delta, side_byte, price_slippage_int)
             + b"\x00"
             + struct.pack("<Q", counter)
