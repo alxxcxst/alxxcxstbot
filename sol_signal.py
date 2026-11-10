@@ -13,8 +13,7 @@ from solders.pubkey import Pubkey
 from solders.instruction import Instruction, AccountMeta
 from solders.transaction import VersionedTransaction
 from solders.message import MessageV0
-from solana.rpc.api import Client
-from solana.rpc.types import TxOpts
+
 
 # ==========================================
 # 1. PARÁMETROS Y VARIABLES DE ENTORNO
