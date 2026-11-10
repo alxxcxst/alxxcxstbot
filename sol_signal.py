@@ -113,8 +113,17 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     return pda
 
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
-    client = Client(RPC_URL)
-    latest_blockhash = client.get_latest_blockhash().value.blockhash
+    # 1. Obtener el blockhash reciente mediante HTTP POST al nodo RPC (sin librerías pesadas)
+    rpc_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLatestBlockhash",
+        "params": [{"commitment": "confirmed"}]
+    }
+    res_bh = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
+    latest_blockhash = res_bh["result"]["value"]["blockhash"]
+
+    # 2. Compilar y firmar la transacción
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -122,11 +131,27 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
         recent_blockhash=latest_blockhash,
     )
     tx = VersionedTransaction(msg, [kp])
-    res = client.send_raw_transaction(
-        bytes(tx),
-        opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed")
-    )
-    return str(res.value)
+    
+    # 3. Enviar transacción firmada en crudo mediante RPC HTTP
+    raw_tx_bytes = bytes(tx)
+    import base64
+    encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
+    
+    send_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": [
+            encoded_tx,
+            {"encoding": "base64", "skipPreflight": False, "preflightCommitment": "confirmed"}
+        ]
+    }
+    res_send = requests.post(RPC_URL, json=send_payload, timeout=10).json()
+    
+    if "error" in res_send:
+        raise Exception(res_send["error"])
+        
+    return res_send["result"]
 
 def execute_order_onchain(direction: str, entry_price: float):
     """Envía un Market Request (LONG o SHORT) al contrato de Jupiter Perps."""
