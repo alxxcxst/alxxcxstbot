@@ -2,18 +2,18 @@ import os
 import time
 import struct
 import hashlib
+import base64
 import threading
 import requests
 import pandas as pd
 from flask import Flask
 
-# Librerías criptográficas nativas de Solana
+# Librerías criptográficas nativas de Solana (solders)
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.instruction import Instruction, AccountMeta
 from solders.transaction import VersionedTransaction
 from solders.message import MessageV0
-
 
 # ==========================================
 # 1. PARÁMETROS Y VARIABLES DE ENTORNO
@@ -112,7 +112,7 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     return pda
 
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
-    # 1. Obtener el blockhash reciente mediante HTTP POST al nodo RPC (sin librerías pesadas)
+    # 1. Obtener blockhash reciente mediante HTTP RPC
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -122,7 +122,7 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     res_bh = requests.post(RPC_URL, json=rpc_payload, timeout=10).json()
     latest_blockhash = res_bh["result"]["value"]["blockhash"]
 
-    # 2. Compilar y firmar la transacción
+    # 2. Compilar y firmar la transacción v0
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -131,9 +131,8 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     )
     tx = VersionedTransaction(msg, [kp])
     
-    # 3. Enviar transacción firmada en crudo mediante RPC HTTP
+    # 3. Codificar en base64 y transmitir por HTTP al nodo RPC
     raw_tx_bytes = bytes(tx)
-    import base64
     encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
     
     send_payload = {
@@ -148,7 +147,7 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     res_send = requests.post(RPC_URL, json=send_payload, timeout=10).json()
     
     if "error" in res_send:
-        raise Exception(res_send["error"])
+        raise Exception(str(res_send["error"]))
         
     return res_send["result"]
 
@@ -201,10 +200,9 @@ def execute_order_onchain(direction: str, entry_price: float):
         funding_account = get_associated_token_address(owner, USDC_MINT)
         position_req_ata = get_associated_token_address(position_req_pda, USDC_MINT)
 
-        # Discriminador Anchor corregido a bytes puros
-        disc = list(hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8])
+        disc = hashlib.sha256(b"global:create_increase_position_market_request").digest()[:8]
         data = (
-            bytes(disc)
+            disc
             + struct.pack("<QQBQ", size_usd_delta, collateral_delta, side_byte, price_slippage_int)
             + b"\x00"
             + struct.pack("<Q", counter)
@@ -557,7 +555,7 @@ def market_engine():
         f"Mercado: <b>{SYMBOL} (15m)</b>\n"
         f"Wallet Phantom: {wallet_desc}\n"
         f"Posición por trade: <code>${MARGIN_USDC:.2f} USDC a {LEVERAGE}x (${MARGIN_USDC*LEVERAGE:.2f} USD)</code>\n"
-        f"Comandos: <code>/precio</code> | <code>/status</code> | <code>/test</code> | <code>/close</code>",
+        f"Comandos: <code>/precio</code> | <code>/status</code> | <code>/test</code> | <code>/testshort</code> | <code>/close</code>",
         clean_previous=True
     )
 
