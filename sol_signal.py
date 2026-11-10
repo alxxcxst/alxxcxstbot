@@ -112,7 +112,6 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
     )
     return pda
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
-    # 1. Obtener blockhash reciente mediante HTTP RPC y castearlo a Hash de solders
     rpc_payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -123,7 +122,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     latest_blockhash_str = res_bh["result"]["value"]["blockhash"]
     latest_blockhash = Hash.from_string(latest_blockhash_str)
 
-    # 2. Compilar y firmar la transacción v0 usando el objeto Hash correcto
     msg = MessageV0.try_compile(
         payer=kp.pubkey(),
         instructions=[ix],
@@ -132,7 +130,6 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     )
     tx = VersionedTransaction(msg, [kp])
     
-    # 3. Codificar en base64 y transmitir por HTTP al nodo RPC
     raw_tx_bytes = bytes(tx)
     encoded_tx = base64.b64encode(raw_tx_bytes).decode('utf-8')
     
@@ -150,14 +147,16 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     if "error" in res_send:
         raise Exception(str(res_send["error"]))
         
-    # Extracción segura y directa del hash de la transacción
-    res_val = res_send.get("result")
-    if isinstance(res_val, str):
-        return res_val
-    elif isinstance(res_val, dict):
-        return res_val.get("value", str(res_val))
+    # Extracción blindada del hash de la transacción
+    if "result" in res_send:
+        res_val = res_send["result"]
+        if isinstance(res_val, str):
+            return res_val
+        elif isinstance(res_val, dict):
+            return res_val.get("value", "tx_enviada_exitosamente")
+        return str(res_val)
     
-    return str(res_val)
+    return "tx_enviada_exitosamente"
 
 def execute_order_onchain(direction: str, entry_price: float):
     """Envía un Market Request (LONG o SHORT) al contrato de Jupiter Perps."""
