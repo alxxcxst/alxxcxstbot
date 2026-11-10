@@ -111,7 +111,6 @@ def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
         ASSOC_TOKEN_PROGRAM_ID
     )
     return pda
-
 def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     # 1. Obtener blockhash reciente mediante HTTP RPC y castearlo a Hash de solders
     rpc_payload = {
@@ -151,10 +150,14 @@ def build_and_send_jup_perp_tx(ix: Instruction, kp: Keypair) -> str:
     if "error" in res_send:
         raise Exception(str(res_send["error"]))
         
-    # Extraer el hash de la transacción de manera segura independientemente del formato de respuesta
-    if isinstance(res_send.get("result"), dict):
-        return res_send["result"].get("value", "tx_enviada")
-    return str(res_send.get("result", "tx_enviada"))
+    # Extracción segura y directa del hash de la transacción
+    res_val = res_send.get("result")
+    if isinstance(res_val, str):
+        return res_val
+    elif isinstance(res_val, dict):
+        return res_val.get("value", str(res_val))
+    
+    return str(res_val)
 
 def execute_order_onchain(direction: str, entry_price: float):
     """Envía un Market Request (LONG o SHORT) al contrato de Jupiter Perps."""
