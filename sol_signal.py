@@ -4,48 +4,50 @@ import threading
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
+from flask import Flask
 
 # ==========================================
-# CONFIGURACIÓN GENERAL Y CREDENCIALES
+# CONFIGURACIÓN DE FLASK (Para Render)
+# ==========================================
+app = Flask(__name__)
+
+@app.route("/")
+def health_check():
+    return "🤖 Bot Cuantitativo Multiactivo (SOL-ETH) en línea y operando.", 200
+
+# ==========================================
+# CONFIGURACIÓN DEL BOT DE TRADING
 # ==========================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Parámetros modulares de gestión de riesgo por activo
 ASSET_CONFIG = {
     "SOL-USD": {
         "display": "SOL-PERP",
         "tp_pct": 0.030,      # Take Profit: +3.0%
         "sl_pct": 0.015,      # Stop Loss: -1.5%
         "be_pct": 0.012,      # Break-Even: +1.2%
-        "vol_factor": 1.15,   # Factor mínimo de volumen MA20
+        "vol_factor": 1.15,   
     },
     "ETH-USD": {
         "display": "ETH-PERP",
-        "tp_pct": 0.015,      # Take Profit: +1.5% (Objetivo realista en 5M)
+        "tp_pct": 0.015,      # Take Profit: +1.5%
         "sl_pct": 0.010,      # Stop Loss: -1.0%
         "be_pct": 0.008,      # Break-Even: +0.8%
-        "vol_factor": 1.10,   # Factor mínimo de volumen MA20
+        "vol_factor": 1.10,   
     }
 }
 
-# Parámetros cuantitativos comunes
 MARGIN_USD = 3.0
 LEVERAGE = 5
 MAX_OVERBOUGHT_RSI = 68.0
-MIN_OVERSOLD_RSI = 32.0
-MAX_WICK_RATIO = 0.45       # Escudo anti-mechazos (>45% de mecha bloquea)
+MAX_WICK_RATIO = 0.45       
 
-# Estados en memoria
 active_trades = {pair: None for pair in ASSET_CONFIG.keys()}
 last_processed_timestamps = {pair: 0 for pair in ASSET_CONFIG.keys()}
 eval_counter = 0
 telegram_update_offset = 0
 
-# ==========================================
-# FUNCIONES DE TELEGRAM
-# ==========================================
 def send_telegram(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[TELEGRAM LOG]: {text}")
@@ -62,16 +64,12 @@ def send_telegram(text: str):
     except Exception as e:
         print(f"Error enviando mensaje a Telegram: {e}")
 
-# ==========================================
-# CONEXIÓN API COINBASE
-# ==========================================
 def fetch_candles_5m(pair: str):
     url = f"https://api.exchange.coinbase.com/products/{pair}/candles?granularity=300"
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            # Coinbase entrega: [time, low, high, open, close, volume]
             df = pd.DataFrame(data, columns=["timestamp", "low", "high", "open", "close", "volume"])
             df = df.sort_values("timestamp").reset_index(drop=True)
             return df
@@ -89,9 +87,6 @@ def fetch_live_price(pair: str) -> float:
         pass
     return 0.0
 
-# ==========================================
-# CÁLCULO DE INDICADORES CUANTITATIVOS
-# ==========================================
 def calculate_indicators(df: pd.DataFrame):
     df["close"] = df["close"].astype(float)
     df["volume"] = df["volume"].astype(float)
@@ -99,10 +94,8 @@ def calculate_indicators(df: pd.DataFrame):
     df["low"] = df["low"].astype(float)
     df["open"] = df["open"].astype(float)
 
-    # EMA 200
     df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
 
-    # RSI (14)
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -111,16 +104,10 @@ def calculate_indicators(df: pd.DataFrame):
     rs = avg_gain / avg_loss.replace(0, np.nan)
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # Media Móvil de Volumen (MA20)
     df["vol_ma20"] = df["volume"].rolling(window=20).mean()
-
     return df
 
-# ==========================================
-# EVALUACIÓN DE SEÑALES (v2.0)
-# ==========================================
 def evaluate_market_signal(pair: str, df: pd.DataFrame):
-    # Evaluamos la última vela totalmente cerrada (penúltima fila del DF)
     closed = df.iloc[-2]
     prev = df.iloc[-3]
 
@@ -137,19 +124,13 @@ def evaluate_market_signal(pair: str, df: pd.DataFrame):
     upper_wick = closed["high"] - max(closed["open"], c_close)
     wick_ratio = upper_wick / candle_range if candle_range > 0 else 0
 
-    # 1. Filtro de Tendencia Estructural (EMA 200)
     if c_close <= c_ema:
         return None
-
-    # 2. Escudo Anti-Mechazos
     if wick_ratio > MAX_WICK_RATIO:
         return None
-
-    # 3. Filtro de Volumen Institucional
     if vol_ratio < cfg["vol_factor"]:
         return None
 
-    # 4. Gatillo de Entrada por RSI (Pullback >= 50 o Ruptura >= 55)
     crossed_rebound = (p_rsi < 50.0) and (c_rsi >= 50.0)
     crossed_momentum = (p_rsi < 55.0) and (c_rsi >= 55.0)
 
@@ -171,32 +152,25 @@ def evaluate_market_signal(pair: str, df: pd.DataFrame):
             "be_moved": False,
             "timestamp": int(closed["timestamp"])
         }
-
     return None
 
-# ==========================================
-# MONITOR DE SALIDAS (TP / SL / BREAK-EVEN)
-# ==========================================
 def monitor_active_trades():
     for pair, trade in list(active_trades.items()):
         if trade is None:
             continue
-
         live_price = fetch_live_price(pair)
         if live_price <= 0:
             continue
 
-        # Alerta de Break-Even (+1.2% en SOL / +0.8% en ETH)
         if not trade["be_moved"] and live_price >= trade["be_price"]:
             trade["be_moved"] = True
             send_telegram(
                 f"🛡️ <b>BREAK-EVEN ACTIVADO · {trade['display']}</b>\n\n"
                 f"💵 Precio Actual: <b>${live_price:,.2f}</b>\n"
                 f"🎯 Entrada: <b>${trade['entry_price']:,.2f}</b>\n\n"
-                f"⚡ <i>Acción: Mueve tu Stop Loss en Phantom al precio de entrada para blindar la operación sin riesgo.</i>"
+                f"⚡ <i>Acción: Mueve tu Stop Loss en Phantom al precio de entrada.</i>"
             )
 
-        # Take Profit
         if live_price >= trade["tp_price"]:
             send_telegram(
                 f"🎉 <b>TAKE PROFIT ALCANZADO · {trade['display']}</b>\n\n"
@@ -204,8 +178,6 @@ def monitor_active_trades():
                 f"⚡ Posición cerrada con éxito. El par queda LIBRE."
             )
             active_trades[pair] = None
-
-        # Stop Loss
         elif live_price <= trade["sl_price"]:
             send_telegram(
                 f"🛑 <b>STOP LOSS EJECUTADO · {trade['display']}</b>\n\n"
@@ -214,9 +186,6 @@ def monitor_active_trades():
             )
             active_trades[pair] = None
 
-# ==========================================
-# COMANDOS INTERACTIVOS DE TELEGRAM
-# ==========================================
 def handle_telegram_commands():
     global telegram_update_offset, active_trades
     if not TELEGRAM_TOKEN:
@@ -276,7 +245,7 @@ def handle_telegram_commands():
                 else:
                     active_trades["SOL-USD"] = None
                     active_trades["ETH-USD"] = None
-                    send_telegram("🔓 <b>Todos los activos liberados.</b> Modo escaneo activo.")
+                    send_telegram("🔓 <b>Todos los activos liberados.</b>")
 
             elif text in ["/restart"]:
                 send_telegram("⚡ <b>Reiniciando variables de escaneo...</b>")
@@ -285,12 +254,9 @@ def handle_telegram_commands():
     except Exception as e:
         print(f"Error procesando updates de Telegram: {e}")
 
-# ==========================================
-# BUCLE PRINCIPAL DE ESCANEO
-# ==========================================
 def main_scanner_loop():
     global eval_counter
-    print("Iniciando escáner cuantitativo dual (SOL + ETH)...")
+    print("Iniciando escáner cuantitativo dual (SOL + ETH) en hilo secundario...")
     send_telegram(
         "⚡ <b>BOT CUANTITATIVO MULTIACTIVO ACTIVO (v2.0)</b>\n\n"
         "• <b>Pares vigilados:</b> SOL-PERP (TP 3.0%) | ETH-PERP (TP 1.5%)\n"
@@ -300,13 +266,11 @@ def main_scanner_loop():
 
     while True:
         try:
-            # 1. Monitorear salidas si hay operaciones activas
             monitor_active_trades()
 
-            # 2. Escaneo periódico de velas cerradas para cada activo
             for pair in ASSET_CONFIG.keys():
                 if active_trades[pair] is not None:
-                    continue  # Si ya hay un trade activo en este par, saltamos
+                    continue
 
                 df = fetch_candles_5m(pair)
                 if df is None or len(df) < 205:
@@ -314,7 +278,6 @@ def main_scanner_loop():
 
                 closed_candle_ts = int(df.iloc[-2]["timestamp"])
 
-                # Verificación estricta de vela cerrada para no duplicar evaluación
                 if closed_candle_ts > last_processed_timestamps[pair]:
                     df = calculate_indicators(df)
                     signal = evaluate_market_signal(pair, df)
@@ -333,7 +296,6 @@ def main_scanner_loop():
                     last_processed_timestamps[pair] = closed_candle_ts
                     eval_counter += 1
 
-            # 3. Procesar comandos interactivos de Telegram
             handle_telegram_commands()
 
         except Exception as e:
@@ -341,5 +303,12 @@ def main_scanner_loop():
 
         time.sleep(3)
 
+# ==========================================
+# LANZAR HILO DEL BOT AL INICIAR FLASK
+# ==========================================
 if __name__ == "__main__":
-    main_scanner_loop()
+    bot_thread = threading.Thread(target=main_scanner_loop, daemon=True)
+    bot_thread.start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
