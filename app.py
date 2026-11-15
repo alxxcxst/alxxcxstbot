@@ -184,6 +184,8 @@ def send_telegram(text: str, reply_markup: dict = None, is_ui_response: bool = F
             if is_ui_response and msg_id:
                 last_bot_ui_message_id = msg_id
             return msg_id
+        else:
+            print(f"[ERROR] Telegram API ({resp.status_code}): {resp.text}")
     except Exception as e:
         print(f"[ERROR] Fallo al enviar mensaje a Telegram: {e}")
     return None
@@ -612,10 +614,10 @@ def generate_telemetry_report() -> str:
 
             macro_trend = "🟢 Alcista" if (ema200_1h > 0 and close_p > ema200_1h) else "🔴 Bajista"
             micro_trend = (
-                "🟢 Alcista (Precio > EMA20 > EMA200)"
+                "🟢 Alcista (Precio &gt; EMA20 &gt; EMA200)"
                 if (close_p > ema20_5m > ema200_5m)
                 else (
-                    "🔴 Bajista (Precio < EMA20 < EMA200)"
+                    "🔴 Bajista (Precio &lt; EMA20 &lt; EMA200)"
                     if (close_p < ema20_5m < ema200_5m)
                     else "⚖️ Transición / Rango"
                 )
